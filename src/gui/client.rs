@@ -97,6 +97,19 @@ impl Client {
         matches!(self.mode, Mode::Own { .. })
     }
 
+    /// The console of this window and its runtime (the integrated terminal needs them).
+    pub fn console(&self) -> Option<(tokio::runtime::Handle, Arc<Console>)> {
+        match &self.mode {
+            Mode::Own { rt, console } => Some((rt.handle().clone(), console.clone())),
+            _ => None,
+        }
+    }
+
+    pub fn waker(&self) -> Waker {
+        let w = self.waker.clone();
+        Arc::new(move || wake(&w))
+    }
+
     pub fn broken(&self) -> Option<&str> {
         match &self.mode {
             Mode::Broken(e) => Some(e),

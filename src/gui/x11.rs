@@ -637,6 +637,11 @@ pub fn run(client: Client) -> Result<()> {
                     _ => {}
                 }
             }
+            if let Some(vo) = out.viewport_output.get(&ViewportId::ROOT) {
+                if vo.commands.iter().any(|c| matches!(c, egui::ViewportCommand::RequestPaste)) {
+                    w.request_paste();
+                }
+            }
             w.set_cursor(out.platform_output.cursor_icon);
             let delay = out.viewport_output.get(&ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
             next_frame = if delay < Duration::from_secs(3600) { Some(Instant::now() + delay) } else { None };

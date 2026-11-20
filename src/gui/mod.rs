@@ -22,6 +22,7 @@ mod native;
 mod raster;
 #[cfg(target_os = "linux")]
 mod sni;
+mod term;
 #[cfg(target_os = "linux")]
 mod x11;
 

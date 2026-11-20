@@ -210,7 +210,38 @@ mod imp {
             }
         }
         cmd.env("TERM", &spec.term);
+        // No login manager sets the language here: without it shells run in the C locale and drop accented
+        // input. Use the system's (or UTF-8), unless this process already has one.
+        if acc.is_some() || std::env::var_os("LANG").is_none() {
+            cmd.env("LANG", system_lang());
+        }
         cmd
+    }
+
+    /// The system language (`/etc/default/locale`, `/etc/locale.conf`), else `C.UTF-8`; `en_US.UTF-8` on macOS.
+    fn system_lang() -> String {
+        if let Ok(l) = std::env::var("LANG") {
+            if l.to_uppercase().contains("UTF") {
+                return l;
+            }
+        }
+        for f in ["/etc/default/locale", "/etc/locale.conf"] {
+            if let Ok(s) = std::fs::read_to_string(f) {
+                for line in s.lines() {
+                    if let Some(v) = line.trim().strip_prefix("LANG=") {
+                        let v = v.trim_matches('"').trim();
+                        if !v.is_empty() {
+                            return v.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if cfg!(target_os = "macos") {
+            "en_US.UTF-8".into()
+        } else {
+            "C.UTF-8".into()
+        }
     }
 
     pub fn spawn(spec: &Spec) -> Result<Child> {

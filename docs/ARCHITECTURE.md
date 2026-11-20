@@ -235,8 +235,8 @@ Placeholders: `{node}`, `{network}`, `{user}`, `{login}` (= `user@node`), `{logi
 
 ### Integrated terminal
 
-The GUI's terminal tab uses the same node-side session protocol directly (no SSH), and later the persistent,
-mosh-like terminal of section 6.
+The GUI's terminal ("Terminal here", section 12) uses the same node-side session protocol directly (no SSH),
+resumable, and attaches to the persistent terminals of section 6 as well. Implemented 2026-11-20.
 
 **Images in the terminal** (Kitty graphics protocol, sixel, iTerm2 inline images) are escape sequences in the
 terminal stream: the gateway and the node's PTY carry them untouched, so they work from Linux / macOS nodes when
@@ -338,8 +338,8 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   English (from the system, `GANGLI_LANG`, or the IT/EN button). `gangli gui`, or a double click (Windows:
   the console window made for the double click is released; Linux / macOS: started without a terminal):
   - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, since / last seen),
-    filter; a machine's panel: open it with each launcher (PuTTY, OpenSSH, WinSCP…) as a chosen user and
-    optionally in a persistent terminal, copy the gateway password or an `ssh` command line, its persistent
+    filter; a machine's panel: a **terminal inside the window** ("Terminal here"), or each launcher (PuTTY,
+    OpenSSH, WinSCP…), as a chosen user and optionally in a persistent terminal; copy the gateway password or an `ssh` command line, its persistent
     terminals (open / close), its tunnels (add), inventory, signed update from a release folder, forget;
   - *Networks*: create (dialog with the public code, and the private one hidden until asked), codes, add one
     with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
@@ -351,6 +351,12 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     run the node inside the window, install as a service (with `--to` when the folder is shared), the
     installed service and uninstall; the files gangli keeps. A binary with an embedded code and no console
     network opens on this page.
+- **Integrated terminal** (`gui/term.rs`, when the console lives in the window): tabs of shells or persistent
+  terminals on machines, over the same resumable stream as the gateway (survives drops); alacritty_terminal
+  keeps the screen, egui draws it (256 colours and truecolor, bold, underline, wide characters); xterm keys,
+  bracketed paste, answers to the program's queries; drag selects and copies, right click or Ctrl+V pastes,
+  the wheel scrolls back. Unix sessions get the system language (else `C.UTF-8`): without it shells drop
+  accented input. Not yet: predictive local echo.
 - The GUI **is** a console: it opens one in its process (owning the local port, the gateway, the tunnels).
   If a console is already open in the folder: a GUI there is brought up instead (`GuiShow` over the local
   API, the second process exits), a `gangli console run` is used through its local API.
@@ -435,5 +441,4 @@ called for core features.
 5. Resumable streams; `exec` and jobs; own relays; directory pages; signed self-update; persistent terminals
    with state sync. ✓
 6. GUI with tray (node + console unified), API tokens in the GUI. ✓
-7. Next: integrated terminal in the GUI (alacritty_terminal screen, predictive echo); later public code
-   rotation, update rollback.
+7. Integrated terminal in the GUI. ✓ Later: predictive local echo, public code rotation, update rollback.

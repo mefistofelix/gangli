@@ -34,6 +34,7 @@ enum Page {
     Ssh,
     Api,
     Computer,
+    Terminals,
 }
 
 enum Modal {
@@ -110,6 +111,9 @@ pub struct App {
     styled: bool,
     /// Text to put on the clipboard at the next frame.
     copy: Option<String>,
+    /// Integrated terminals (only when the console lives in this window).
+    tabs: Vec<super::term::TermTab>,
+    tab_active: usize,
 }
 
 fn target(n: &NodeView) -> String {
@@ -202,6 +206,8 @@ impl App {
             show: false,
             styled: false,
             copy: None,
+            tabs: vec![],
+            tab_active: 0,
         };
         app.read_node();
         // A binary made for a relative (with an embedded code), or a computer with no network yet: start on
@@ -220,6 +226,11 @@ impl App {
             "computer" => Page::Computer,
             _ => app.page,
         };
+        // For tests: open an integrated terminal on this machine at once.
+        if let Ok(t) = std::env::var("GANGLI_GUI_TERM") {
+            let name = t.split('.').next().unwrap_or(&t).to_string();
+            app.open_term(&t, &name, None, None);
+        }
         app.call(Tag::Ssh, IpcOp::SshStatus);
         app
     }
@@ -466,6 +477,12 @@ impl App {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui));
             });
         }
+        if self.page == Page::Terminals {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.terminals(ui));
+            self.draw_modal(&ctx);
+            self.draw_toasts(&ctx);
+            return;
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.page {
                 Page::Machines => self.machines(ui),
@@ -474,6 +491,7 @@ impl App {
                 Page::Ssh => self.ssh_page(ui),
                 Page::Api => self.api_page(ui),
                 Page::Computer => self.computer(ui),
+                Page::Terminals => {}
             });
         });
         self.draw_modal(&ctx);
@@ -499,6 +517,12 @@ impl App {
                 if ui.selectable_label(self.page == p, label).clicked() {
                     self.page = p;
                     self.polled = None;
+                }
+            }
+            if !self.tabs.is_empty() {
+                let label = trf(format!("Terminals ({})", self.tabs.len()), format!("Terminali ({})", self.tabs.len()));
+                if ui.selectable_label(self.page == Page::Terminals, label).clicked() {
+                    self.page = Page::Terminals;
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -638,6 +662,14 @@ impl App {
         let term = (!self.f.term.trim().is_empty()).then(|| self.f.term.trim().to_string());
         let launchers: Vec<String> = self.ssh["launchers"].as_array().map(|a| a.iter().map(|l| s(&l["name"]).to_string()).collect()).unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
+            if self.client.console().is_some()
+                && ui
+                    .add_enabled(n.online, egui::Button::new(RichText::new(tr("Terminal here", "Terminale qui")).strong()))
+                    .on_hover_text(tr("A terminal inside this window", "Un terminale dentro questa finestra"))
+                    .clicked()
+            {
+                self.open_term(&tgt, &n.name, user.clone(), term.clone());
+            }
             for l in &launchers {
                 if ui.add_enabled(n.online, egui::Button::new(l)).clicked() {
                     self.call(Tag::Launch, IpcOp::Launch { node: tgt.clone(), launcher: Some(l.clone()), user: user.clone(), term: term.clone() });
@@ -671,9 +703,12 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&name).monospace());
                         ui.label(RichText::new(format!("{} · {}", s(&t["user"]), human_ago(now().saturating_sub(t["started"].as_u64().unwrap_or(0))))).weak());
+                        let u = Some(s(&t["user"]).to_string()).filter(|u| !u.is_empty());
+                        if self.client.console().is_some() && ui.small_button(tr("here", "qui")).clicked() {
+                            self.open_term(&tgt, &n.name, u.clone(), Some(name.clone()));
+                        }
                         if ui.small_button(tr("open", "apri")).clicked() {
-                            let u = Some(s(&t["user"]).to_string()).filter(|u| !u.is_empty());
-                            self.call(Tag::Launch, IpcOp::Launch { node: tgt.clone(), launcher: None, user: u, term: Some(name.clone()) });
+                            self.call(Tag::Launch, IpcOp::Launch { node: tgt.clone(), launcher: None, user: u.clone(), term: Some(name.clone()) });
                         }
                         if ui.small_button(tr("close", "chiudi")).clicked() {
                             self.call(Tag::Done(trf(format!("terminal {name} closed"), format!("terminale {name} chiuso"))), IpcOp::TermKill { node: tgt.clone(), name: name.clone() });
@@ -1138,6 +1173,56 @@ impl App {
         self.node.job = Some(out.clone());
         self.node.job_output.clear();
         run_gangli(exe, args, out);
+    }
+
+    // ----- Integrated terminals -----
+
+    fn open_term(&mut self, target: &str, name: &str, user: Option<String>, persistent: Option<String>) {
+        let Some((rt, c)) = self.client.console() else { return };
+        let label = match (&user, &persistent) {
+            (Some(u), Some(t)) => format!("{u}@{name}/{t}"),
+            (None, Some(t)) => format!("{name}/{t}"),
+            (Some(u), None) => format!("{u}@{name}"),
+            (None, None) => name.to_string(),
+        };
+        let tab = super::term::TermTab::open(&rt, c, target.to_string(), label, user, persistent, self.client.waker());
+        self.tabs.push(tab);
+        self.tab_active = self.tabs.len() - 1;
+        self.page = Page::Terminals;
+    }
+
+    fn terminals(&mut self, ui: &mut Ui) {
+        if self.tabs.is_empty() {
+            self.page = Page::Machines;
+            return;
+        }
+        self.tab_active = self.tab_active.min(self.tabs.len() - 1);
+        let mut close = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, t) in self.tabs.iter().enumerate() {
+                let mut title = t.title();
+                if title.chars().count() > 40 {
+                    title = title.chars().take(39).collect::<String>() + "…";
+                }
+                if t.ended() {
+                    title = format!("({title})");
+                }
+                if ui.selectable_label(i == self.tab_active, title).clicked() {
+                    self.tab_active = i;
+                }
+                if ui.small_button("×").on_hover_text(tr("Close this terminal", "Chiudi questo terminale")).clicked() {
+                    close = Some(i);
+                }
+                ui.add_space(6.0);
+            }
+        });
+        ui.add_space(2.0);
+        if let Some(i) = close {
+            self.tabs.remove(i);
+            return;
+        }
+        let active = self.tab_active;
+        self.tabs[active].ui(ui);
     }
 
     // ----- Overlays -----
