@@ -58,6 +58,11 @@ pub fn slug(s: &str) -> String {
     }
 }
 
+/// A host name without its domain ("Mac-mini.local" → "Mac-mini"): the name a machine gets.
+pub fn short_host(h: &str) -> &str {
+    h.split('.').next().filter(|s| !s.is_empty()).unwrap_or(h)
+}
+
 /// `base`, or `base-2`, `base-3`... whichever is not in `taken`.
 pub fn unique_name<'a>(base: &str, taken: impl Iterator<Item = &'a str> + Clone) -> String {
     let base = slug(base);

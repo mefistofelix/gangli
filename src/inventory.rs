@@ -54,6 +54,10 @@ impl Inventory {
     /// "Windows 11 Home", "Ubuntu 24.04 LTS", "macOS 15.1": the OS name without repeating it.
     pub fn os_label(&self) -> String {
         let v = self.os_version.trim();
+        // sysinfo says "Darwin" for the system and "macOS 15.1 Sequoia" for the version.
+        if self.os == "Darwin" && !v.is_empty() {
+            return v.to_string();
+        }
         if v.is_empty() {
             self.os.clone()
         } else if v.to_lowercase().contains(&self.os.to_lowercase()) || self.os.is_empty() {

@@ -21,8 +21,22 @@ ko() { echo "FAIL $*"; FAIL=$((FAIL + 1)); }
 step() { echo; echo "== $*"; }
 # Elevated commands: sudo on Unix; on Windows the runner account is already an administrator.
 admin() { if [ "$OS" = windows ]; then "$@"; else sudo -n "$@"; fi; }
-# `timeout` without GNU coreutils (macOS has none).
-tmo() { local s=$1; shift; "$@" & local p=$!; ( sleep "$s"; kill $p 2> /dev/null ) & local k=$!; wait $p; local r=$?; kill $k 2> /dev/null; return $r; }
+# `timeout` without GNU coreutils (macOS has none). The sleeper writes nowhere and dies with it: a process left
+# holding test.log open would stop the build machine from sealing the result (Windows).
+tmo() {
+  local s=$1; shift
+  "$@" &
+  local p=$!
+  sleep "$s" > /dev/null 2>&1 < /dev/null &
+  local k=$!
+  while kill -0 $p 2> /dev/null; do
+    kill -0 $k 2> /dev/null || { kill $p 2> /dev/null; break; }
+    sleep 1
+  done
+  wait $p; local r=$?
+  kill $k 2> /dev/null; wait $k 2> /dev/null
+  return $r
+}
 note() { echo "NOTE $*"; }
 online() { "$G" nodes 2>/dev/null | grep -q " online "; }
 wait_online() { for _ in $(seq 1 ${1:-60}); do online && return 0; sleep 1; done; return 1; }
@@ -33,7 +47,7 @@ step version
 step "network and console"
 PUB=$("$G" --json network create test | sed -n 's/.*"public_code": *"\([^"]*\)".*/\1/p')
 [ -n "$PUB" ] && ok "network create" || ko "network create"
-(cd "$C" && "./$EXE" console run > "$T/console.out" 2>&1 &)
+(cd "$C" && "./$EXE" console run > "$T/console.out" 2>&1 < /dev/null &)
 sleep 3
 "$G" console status && ok "console open" || ko "console open"
 
@@ -63,8 +77,13 @@ echo "gui exit: $?"; unset GANGLI_GUI_SCREENSHOT
 grep "gui:" "$C/gangli.log" | tail -3
 
 step "update (the service restarts with the binary it receives)"
+runs() { admin cat "$N/gangli.log" 2> /dev/null | grep -c "node running"; }
+BEFORE=$(runs)
 "$G" update "$NODE" --from "$OUT" && ok "update sent" || ko "update sent"
-sleep 5
+# The service manager must start the new binary: one more "node running" in the node's log.
+for _ in $(seq 1 60); do [ "$(runs)" -gt "$BEFORE" ] && break; sleep 1; done
+[ "$(runs)" -gt "$BEFORE" ] && ok "service restarted with the new binary" || ko "service restarted with the new binary"
+sleep 3
 if wait_online 90; then ok "back online after update"; else ko "back online after update"; fi
 
 step uninstall
@@ -80,5 +99,7 @@ step logs
 "$G" console stop
 echo "--- node log"; admin cat "$N/gangli.log" 2>/dev/null | tail -15
 echo "--- console log"; tail -15 "$C/gangli.log"
+# Nothing of ours may outlive the test (open files would block sealing the result).
+[ "$OS" = windows ] && taskkill //F //IM gangli.exe > /dev/null 2>&1
 echo
 echo "TESTS: $PASS passed, $FAIL failed"
