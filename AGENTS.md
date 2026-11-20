@@ -35,7 +35,8 @@ when a decision changes.
 - **Portable, two files.** Everything gangli keeps goes in `gangli.node` and `gangli.console` (TOML) next to
   the executable, plus `gangli.log` (`paths.rs`); never a system or user folder, never `%APPDATA%`,
   `~/.config`, `/var/lib`, no lock, port or temp files next to them either. Only the OS service registration is
-  written elsewhere, by `install`.
+  written elsewhere, by `install`, and the login item (`Run` key, XDG autostart, LaunchAgent) when the user
+  turns "start at login" on in the GUI.
 - **Secrets** (node keys, console keys, network keys, API tokens, `.tools/box-password`) live in files readable
   only by their owner (root / SYSTEM / the user) and are never printed, logged or committed.
 - **No consent UI on managed machines** (owner's decision), but nothing hidden either: normal service name,
