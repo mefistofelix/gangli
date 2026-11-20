@@ -113,3 +113,25 @@ mod tests {
         assert!(!eq_ct("abc", "ab"));
     }
 }
+
+/// Relays from the configuration (section 4 of docs/ARCHITECTURE.md, docs/RELAY.md): `None` keeps the
+/// n0 relays; with URLs, ours first and, if `n0_fallback`, the n0 ones as well.
+pub fn relay_mode(urls: &[String], n0_fallback: bool) -> anyhow::Result<Option<iroh::endpoint::RelayMode>> {
+    use iroh::endpoint::RelayMode;
+    if urls.is_empty() {
+        return Ok(None);
+    }
+    let mut ours = vec![];
+    for u in urls {
+        let url: iroh::RelayUrl = u.trim().parse().map_err(|e| anyhow::anyhow!("relay {u}: {e}"))?;
+        ours.push(url);
+    }
+    if !n0_fallback {
+        return Ok(Some(RelayMode::custom(ours)));
+    }
+    let map = RelayMode::Default.relay_map();
+    for url in ours {
+        map.insert(url.clone(), std::sync::Arc::new(iroh::RelayConfig::from(url)));
+    }
+    Ok(Some(RelayMode::Custom(map)))
+}

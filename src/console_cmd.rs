@@ -330,8 +330,8 @@ pub fn ssh(op: IpcOp, json: bool) -> Result<()> {
 }
 
 /// Fill the launcher and start the program (detached from this terminal).
-pub fn open(node: &str, launcher: Option<String>, user: Option<String>, json: bool) -> Result<()> {
-    let v = ipc::call(IpcOp::Launch { node: node.to_string(), launcher, user })?;
+pub fn open(node: &str, launcher: Option<String>, user: Option<String>, term: Option<String>, json: bool) -> Result<()> {
+    let v = ipc::call(IpcOp::Launch { node: node.to_string(), launcher, user, term })?;
     let argv: Vec<String> = serde_json::from_value(v["argv"].clone())?;
     let Some((prog, args)) = argv.split_first() else { anyhow::bail!("empty launcher command") };
     std::process::Command::new(prog)
@@ -348,6 +348,133 @@ pub fn open(node: &str, launcher: Option<String>, user: Option<String>, json: bo
         if v["gateway_open"].as_bool() != Some(true) {
             eprintln!("note: the SSH gateway runs while a console is open (GUI / tray or `gangli console run`)");
         }
+    }
+    Ok(())
+}
+
+/// Run a command and wait; prints its stdout / stderr and exits with its code (`--json`: one object).
+pub fn exec(node: &str, user: Option<String>, timeout: Option<u64>, command: String, json: bool) -> Result<()> {
+    let v = ipc::call(IpcOp::Exec { node: node.to_string(), user, command, timeout })?;
+    let code = v["exit"].as_i64();
+    if json {
+        print_json(&v);
+    } else {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(v["stdout"].as_str().unwrap_or("").as_bytes());
+        let _ = std::io::stderr().write_all(v["stderr"].as_str().unwrap_or("").as_bytes());
+        if v["timed_out"].as_bool() == Some(true) {
+            eprintln!("gangli: timed out (the command may still be running: use `gangli job start` for long ones)");
+        }
+    }
+    match code {
+        Some(0) => Ok(()),
+        Some(c) => std::process::exit(c as i32),
+        None => std::process::exit(124),
+    }
+}
+
+pub fn job(op: IpcOp, json: bool) -> Result<()> {
+    let v = ipc::call(op)?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    if let Some(j) = v.get("job").and_then(|j| j.as_str()) {
+        println!("{j}");
+        eprintln!("output: gangli job output {} {j} --follow", v["node"].as_str().unwrap_or(""));
+        return Ok(());
+    }
+    if let Some(j) = v.get("killed").and_then(|j| j.as_str()) {
+        println!("job {j} stopped");
+        return Ok(());
+    }
+    let t = now();
+    let jobs = v["jobs"].as_array().cloned().unwrap_or_default();
+    if jobs.is_empty() {
+        println!("no jobs");
+    }
+    for j in jobs {
+        let state = if j["running"].as_bool() == Some(true) { "running".to_string() } else { format!("exit {}", j["exit"]) };
+        println!(
+            "{:<10} {:<10} {:>8} started {} ago  as {:<10} {}",
+            j["id"].as_str().unwrap_or(""),
+            state,
+            human_bytes(j["output"].as_u64().unwrap_or(0)),
+            human_ago(t.saturating_sub(j["started"].as_u64().unwrap_or(t))),
+            j["user"].as_str().unwrap_or(""),
+            j["command"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+pub fn job_output(node: &str, job: &str, follow: bool, json: bool) -> Result<()> {
+    let mut from = 0u64;
+    loop {
+        let v = ipc::call(IpcOp::JobOutput { node: node.to_string(), job: job.to_string(), from: Some(from) })?;
+        if json && !follow {
+            print_json(&v);
+            return Ok(());
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(v["data"].as_str().unwrap_or("").as_bytes());
+        let _ = std::io::stdout().flush();
+        from = v["next"].as_u64().unwrap_or(from);
+        if !follow || v["running"].as_bool() != Some(true) {
+            if let Some(code) = v["exit"].as_i64() {
+                if follow {
+                    eprintln!("[job ended: exit {code}]");
+                }
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
+    let v = ipc::call(IpcOp::Update { nodes, from })?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    let list = v.as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("no machine online to update");
+    }
+    for r in list {
+        if r["ok"].as_bool() == Some(true) {
+            println!("{:<16} updating: {}", r["node"].as_str().unwrap_or(""), r["asset"].as_str().unwrap_or(""));
+        } else {
+            println!("{:<16} not updated: {}", r["node"].as_str().unwrap_or(""), r["error"].as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+pub fn term(op: IpcOp, json: bool) -> Result<()> {
+    let v = ipc::call(op)?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    if let Some(n) = v.get("killed").and_then(|n| n.as_str()) {
+        println!("terminal {n} ended");
+        return Ok(());
+    }
+    let t = now();
+    let terms = v["terms"].as_array().cloned().unwrap_or_default();
+    if terms.is_empty() {
+        println!("no persistent terminals: `gangli open <machine> --term <name>` (or log in as user+machine+name)");
+    }
+    for x in terms {
+        println!(
+            "{:<16} as {:<12} started {} ago, {} attached",
+            x["name"].as_str().unwrap_or(""),
+            x["user"].as_str().unwrap_or(""),
+            human_ago(t.saturating_sub(x["started"].as_u64().unwrap_or(t))),
+            x["attached"]
+        );
     }
     Ok(())
 }

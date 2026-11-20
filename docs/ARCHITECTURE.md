@@ -99,6 +99,9 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
   owner machine), configured with `RelayMode::Custom`, n0 kept as fallback. Paid n0 shared relays are the
   alternative.
   Options researched for later, free ones included: [RELAY.md](RELAY.md).
+- Own relays are a setting of each file: `relays = ["https://relay.example.org"]` in `[node]` of `gangli.node`
+  and in `[console]` of `gangli.console`, `relays_n0_fallback = true` (default) to keep the n0 ones as well;
+  applied when the node / console starts.
 - Dialing by id alone works through n0 address lookup: verified on 2026-11-20 (join 3 s, list and direct
   query ≈ 1.4 s including endpoint start, direct path 7 ms on a LAN).
 - ALPN `gangli/2`: length-prefixed JSON frames; resumable streams and terminals get their own ALPNs.
@@ -119,12 +122,12 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
   *locally* and pushes it only when its stable part (OS, IPs, users, disks, memory size, version) changed.
   Changing values (free memory, free disk, uptime) are asked for on demand (`gangli info`).
 - **Directory**: one pkarr record per network, signed by the network key, on the Mainline DHT and pkarr
-  HTTP relays (no server of ours): network name, up to 3 console ids in clear (for nodes), up to 8 node ids
-  encrypted with the derived directory key (for consoles). Consoles republish it when it changes and every
+  HTTP relays (no server of ours): network name, up to 3 console ids in clear (for nodes), the first 8 node
+  ids encrypted with the derived directory key (for consoles), and the number of pages: further records
+  under keys derived from the network key, 12 more encrypted node ids each (up to 16 pages). Consoles republish it when it changes and every
   30 minutes while open. It is read on events only: a console that opens (or gets a private code) reads it
   and syncs node, console and removed lists with the consoles listed there; a node reads it while waiting
-  for admission, and once when none of its known consoles answers at start. More than 8 nodes: the others
-  come from the consoles' sync (pages under derived keys later).
+  for admission, and once when none of its known consoles answers at start.  
 - **CLI with no open console**: the command runs a one-shot console in its own process (dials the machines
   in parallel, reads the directory, a few seconds), then exits. With an open console the CLI asks it over
   127.0.0.1 with a token from an owner-only file and answers at once. Nothing is ever left running.
@@ -141,14 +144,19 @@ Three layers, each one independent:
    received_offset)`, both sides replay what is missing. **The local TCP connections (PuTTY ↔ console, node ↔
    embedded sshd or LAN target) never see the outage**, so an SSH session survives minutes or hours of
    disconnection (grace period, default 24 h). Same idea as Eternal Terminal, generic for any TCP protocol.
-3. **Persistent terminals (`gangli term`, phase 7).** The PTY lives in the node, detached from any
-   connection. A host-side VT engine keeps the screen state; on (re)attach the node sends a screen snapshot and
-   then live output. On slow links it switches to **state sync** (mosh-like: latest screen diff, skip
-   intermediate frames), then **predictive local echo**. What osewa and shpool do; `cat bigfile` on GPRS is
-   harmless and the terminal stays usable at 1 s RTT.
+3. **Persistent terminals** (`term.rs`). Log in as `user+machine+name` (or `gangli open <machine> --term
+   <name>`): the shell of terminal `name` lives on the node, detached from any connection, like a tmux
+   session; `gangli term list|kill`. alacritty_terminal keeps its screen; whoever attaches gets it redrawn
+   exactly, then the live output. Each viewer has a small queue: when the link is too slow and it fills up,
+   the intermediate output is dropped and the viewer gets the current screen instead (**state sync**, as
+   mosh does), so `cat bigfile` on a mobile link costs one screen. Predictive local echo would need our own
+   terminal client; with PuTTY / OpenSSH it is not possible (later, in the GUI terminal).
 
-Also: zstd on bulk streams, interactive frames before bulk, `exec` jobs keep running and buffering their output
-while the console is away (`gangli job output <id>`).
+**For scripts and LLMs**: `gangli exec <machine> [--user U] -- command` runs a command and returns its stdout,
+stderr and exit code (`--json`: one object; API `{"op":"exec",…}`, token scope `exec`), over a resumable
+stream. `gangli job start|list|output [--follow]|kill` runs commands in the background on the node: they keep
+running, and keep their latest output (1 MiB), with no console connected; finished jobs are forgotten after
+a day. API token scopes: `read` < `exec` (commands, jobs, terminals) < `admin`.
 
 ## 7. SSH gateway, terminal, launchers, tunnels **[decided 2026-11-20]**
 
@@ -306,11 +314,19 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - Binaries are unsigned; the owner guides relatives through SmartScreen / Gatekeeper the first time
     **[decided]**.
 
-## 11. Updates
+## 11. Updates (`update.rs`)
 
-Releases are signed with the owner's release key (Ed25519, kept in `.tools/`). Nodes get updates from the
-consoles over the session (the console downloads the release once), verify the signature, swap the binary
-atomically, restart, and roll back if the new version does not come back healthy within 60 s.
+- The owner's **release key** (Ed25519) is made once with `gangli release keygen --out .tools/release.key`
+  (its public half goes in `.tools/release.pub`); `scripts/remote-build.sh` builds the public half into every
+  binary (`GANGLI_RELEASE_PUB`) and signs every release binary (`<asset>.sig`). Development builds have no key
+  and refuse updates.
+- `gangli update [machines…] --from <folder>` (a folder with a release, e.g. `gh release download build-N`):
+  the console picks each machine's binary by platform and architecture (from its inventory), checks the
+  signature itself, and sends it over the session. The node checks it against its built-in key, renames the
+  running binary to `gangli….old`, puts the new one in place and restarts: the service manager starts it
+  again (systemd `Restart=always`, launchd `KeepAlive`, the Windows recovery action set by `install`), a node
+  run by hand starts the new binary itself. The `.old` file is removed at the next start.
+- Not yet: automatic rollback if the new version does not come back.
 
 ## 12. GUI, tray, local API, LLM agents
 
@@ -375,8 +391,6 @@ called for core features.
 ## 15. Known limits (now)
 
 - The private code cannot be revoked: a leak means a new network.
-- The directory lists up to 8 nodes; a console that only has the private code and finds no other console
-  open sees those 8 first, the others once it syncs with another console.
 - The public code is fixed per network (no expiry or use count).
 - A machine can be node and console at the same time (separate keys); the console does not list its own
   node specially.
@@ -388,7 +402,7 @@ called for core features.
 3. iroh, networks as keys, public / private codes, directory on pkarr, certificates, live sessions,
    inventory push, node without install, embedded code, one-shot or open console. ✓
 4. SSH gateway, sessions as users (Windows tokens, Unix uid), SFTP, saved tunnels, launchers. ✓
-5. Resumable streams (sessions and tunnels survive drops), SOCKS, `exec` / jobs for LLMs.
-6. GUI with tray (node + console unified), local HTTP API + token approval, PuTTY launcher.
-7. `exec` / jobs, `gangli term` with VT engine, state sync, predictive echo.
-8. Signed self-update over the sessions; directory pages for more than 8 nodes; public code rotation; own relay.
+5. Resumable streams; `exec` and jobs; own relays; directory pages; signed self-update; persistent terminals
+   with state sync. ✓
+6. GUI with tray (node + console unified, integrated terminal with predictive echo), API tokens in the GUI.
+7. Later: public code rotation, update rollback.

@@ -123,9 +123,15 @@ async fn collect() -> Inventory {
 }
 
 async fn run(stop: Arc<AtomicBool>) -> Result<()> {
+    crate::update::cleanup();
     let sk = state::node_key()?;
     let me = sk.public();
-    let ep = iroh::Endpoint::builder(presets::N0).secret_key(sk).bind().await.ctx("start endpoint")?;
+    let conf = state::load()?.node;
+    let mut builder = iroh::Endpoint::builder(presets::N0).secret_key(sk);
+    if let Some(m) = crate::util::relay_mode(&conf.relays, conf.relays_n0_fallback)? {
+        builder = builder.relay_mode(m);
+    }
+    let ep = builder.bind().await.ctx("start endpoint")?;
     let sessions = Arc::new(Sessions::default());
     let router = Router::builder(ep).accept(proto::ALPN, NodeHandler { sessions: sessions.clone() }).spawn();
     log_line(&format!("{} node running, id {me}", crate::version_line()));
@@ -478,6 +484,51 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     }
                 }
             }
+            Req::Update { size, sig } if authed => {
+                tokio::spawn(receive_update(send, recv, size, sig));
+            }
+            Req::TermList if authed => {
+                let terms = crate::term::list().into_iter().map(|(name, user, started, attached)| proto::TermInfo { name, user, started, attached }).collect();
+                let _ = proto::write_frame(&mut send, &Resp::Terms { terms }).await;
+                let _ = send.finish();
+            }
+            Req::TermKill { name } if authed => {
+                let resp = match crate::term::kill(&name) {
+                    Ok(()) => Resp::Terms { terms: vec![] },
+                    Err(e) => Resp::Error { message: format!("{e:#}") },
+                };
+                let _ = proto::write_frame(&mut send, &resp).await;
+                let _ = send.finish();
+            }
+            Req::JobStart { user, command } if authed => {
+                let r = start_job(user, command).await;
+                let resp = match r {
+                    Ok(id) => Resp::Job { id },
+                    Err(e) => Resp::Error { message: format!("{e:#}") },
+                };
+                let _ = proto::write_frame(&mut send, &resp).await;
+                let _ = send.finish();
+            }
+            Req::JobList if authed => {
+                let _ = proto::write_frame(&mut send, &Resp::Jobs { jobs: job_list() }).await;
+                let _ = send.finish();
+            }
+            Req::JobOutput { id, from } if authed => {
+                let resp = job_output(&id, from).unwrap_or_else(|e| Resp::Error { message: format!("{e:#}") });
+                let _ = proto::write_frame(&mut send, &resp).await;
+                let _ = send.finish();
+            }
+            Req::JobKill { id } if authed => {
+                let resp = match jobs().lock().unwrap().get_mut(&id) {
+                    Some(j) => {
+                        j.input = None; // dropping the input kills the process
+                        Resp::Job { id: id.clone() }
+                    }
+                    None => Resp::Error { message: "no such job".into() },
+                };
+                let _ = proto::write_frame(&mut send, &resp).await;
+                let _ = send.finish();
+            }
             Req::Shell { user, command, pty, term } if authed => {
                 let term = if term.is_empty() { "xterm-256color".to_string() } else { term };
                 tokio::spawn(run_shell(send, recv, crate::proc::Spec { user, command, pty, term }));
@@ -638,6 +689,25 @@ where
             let (r, w) = tokio::io::split(app);
             pipe_child(w, r, child).await;
         }
+        Req::Attach { name, user, cols, rows } => {
+            let (n2, u2) = (name.clone(), user.clone());
+            let sess = match tokio::task::spawn_blocking(move || crate::term::get_or_start(&n2, &u2, cols, rows)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{e:#}") }).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+                    return;
+                }
+                Err(_) => return,
+            };
+            if proto::write_frame(&mut send, &Resp::Started).await.is_err() {
+                return;
+            }
+            log_line(&format!("terminal {name} attached"));
+            let (app, attach, task) = resume::start(Transport { send: Box::new(send), recv: Box::new(recv), peer_received: 0 }, SHELL_GRACE, None);
+            register(id, console, attach, task);
+            view_terminal(app, sess, cols, rows).await;
+        }
         Req::Forward { target } => {
             let tcp = match tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(target.as_str())).await {
                 Ok(Ok(t)) => t,
@@ -711,5 +781,182 @@ where
         }
     }
     let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+    reader.abort();
+}
+
+/// Output kept per job (the latest bytes).
+const JOB_KEEP: usize = 1 << 20;
+const JOB_FORGET_AFTER: u64 = 24 * 3600;
+
+struct Job {
+    user: String,
+    command: String,
+    started: u64,
+    ended: Option<u64>,
+    exit: Option<i32>,
+    /// Latest output; `base` = offset of its first byte in the whole output.
+    buf: Vec<u8>,
+    base: u64,
+    /// Dropping it kills the process.
+    input: Option<std::sync::mpsc::Sender<crate::proc::In>>,
+}
+
+type JobMap = std::sync::Mutex<HashMap<String, Job>>;
+
+fn jobs() -> &'static JobMap {
+    static J: std::sync::OnceLock<JobMap> = std::sync::OnceLock::new();
+    J.get_or_init(Default::default)
+}
+
+async fn start_job(user: String, command: String) -> Result<String> {
+    let spec = crate::proc::Spec { user: user.clone(), command: Some(command.clone()), pty: None, term: "dumb".into() };
+    let child = tokio::task::spawn_blocking(move || crate::proc::spawn(&spec)).await??;
+    let id = format!("j{}", data_encoding::HEXLOWER.encode(&crate::util::random16()[..4]));
+    let crate::proc::Child { input, mut output } = child;
+    {
+        let mut all = jobs().lock().unwrap();
+        // Forget jobs that ended long ago.
+        let t = now();
+        all.retain(|_, j| j.ended.is_none_or(|e| t.saturating_sub(e) < JOB_FORGET_AFTER));
+        all.insert(id.clone(), Job { user, command, started: t, ended: None, exit: None, buf: vec![], base: 0, input: Some(input) });
+    }
+    log_line(&format!("job {id} started"));
+    let jid = id.clone();
+    tokio::spawn(async move {
+        while let Some(o) = output.recv().await {
+            let mut all = jobs().lock().unwrap();
+            let Some(j) = all.get_mut(&jid) else { break };
+            match o {
+                crate::proc::Out::Stdout(d) | crate::proc::Out::Stderr(d) => {
+                    j.buf.extend_from_slice(&d);
+                    if j.buf.len() > JOB_KEEP {
+                        let cut = j.buf.len() - JOB_KEEP;
+                        j.buf.drain(..cut);
+                        j.base += cut as u64;
+                    }
+                }
+                crate::proc::Out::Exit(code) => {
+                    j.exit = Some(code);
+                    j.ended = Some(now());
+                    j.input = None;
+                    break;
+                }
+            }
+        }
+    });
+    Ok(id)
+}
+
+fn job_list() -> Vec<proto::JobInfo> {
+    let all = jobs().lock().unwrap();
+    let mut v: Vec<proto::JobInfo> = all
+        .iter()
+        .map(|(id, j)| proto::JobInfo {
+            id: id.clone(),
+            user: j.user.clone(),
+            command: j.command.clone(),
+            started: j.started,
+            running: j.ended.is_none(),
+            exit: j.exit,
+            output: j.base + j.buf.len() as u64,
+        })
+        .collect();
+    v.sort_by_key(|j| j.started);
+    v
+}
+
+fn job_output(id: &str, from: u64) -> Result<Resp> {
+    let all = jobs().lock().unwrap();
+    let j = all.get(id).ok_or_else(|| anyhow!("no such job (finished more than a day ago, or the node restarted)"))?;
+    let start = from.max(j.base);
+    let skip = (start - j.base) as usize;
+    let data = String::from_utf8_lossy(&j.buf[skip.min(j.buf.len())..]).to_string();
+    Ok(Resp::JobOutput { data, from: start, next: j.base + j.buf.len() as u64, running: j.ended.is_none(), exit: j.exit })
+}
+
+/// A new binary from a console: verify the release signature, swap, restart.
+async fn receive_update<W, R>(mut send: W, mut recv: R, size: u64, sig: String)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let r: Result<Vec<u8>> = async {
+        if size == 0 || size > 200 << 20 {
+            bail!("bad size");
+        }
+        let mut bytes = vec![0u8; size as usize];
+        recv.read_exact(&mut bytes).await.ctx("receive the binary")?;
+        crate::update::verify(&bytes, &sig)?;
+        Ok(bytes)
+    }
+    .await;
+    match r {
+        Ok(bytes) => {
+            let _ = proto::write_frame(&mut send, &Resp::Updating).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+            log_line("verified update received");
+            // Let the answer leave, then swap and restart (does not return on success).
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Err(e) = tokio::task::spawn_blocking(move || crate::update::install_and_restart(&bytes)).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {
+                log_line(&format!("update failed: {e:#}"));
+            }
+        }
+        Err(e) => {
+            log_line(&format!("update refused: {e:#}"));
+            let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{e:#}") }).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+        }
+    }
+}
+
+/// One viewer of a persistent terminal: a redraw first (and again whenever it fell behind), then the live
+/// output; its keys and size go to the terminal. Leaving does not stop the terminal.
+async fn view_terminal(app: tokio::io::DuplexStream, sess: std::sync::Arc<crate::term::Session>, cols: u16, rows: u16) {
+    use crate::proto::sframe;
+    use std::sync::atomic::Ordering as O;
+    let (mut r, mut w) = tokio::io::split(app);
+    sess.resize(cols, rows);
+    let mut viewer = sess.attach();
+    let input_sess = sess.clone();
+    let reader = tokio::spawn(async move {
+        while let Ok((kind, body)) = sframe::read(&mut r).await {
+            match kind {
+                sframe::DATA => input_sess.input(body),
+                sframe::RESIZE if body.len() == 4 => input_sess.resize(u16::from_be_bytes([body[0], body[1]]), u16::from_be_bytes([body[2], body[3]])),
+                _ => {}
+            }
+        }
+    });
+    loop {
+        if viewer.dirty.swap(false, O::SeqCst) {
+            let screen = sess.redraw(&mut viewer.rx);
+            if sframe::write(&mut w, sframe::DATA, &screen).await.is_err() {
+                break;
+            }
+        }
+        tokio::select! {
+            chunk = viewer.rx.recv() => match chunk {
+                Some(d) => {
+                    if sframe::write(&mut w, sframe::DATA, &d).await.is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    if viewer.exited.load(O::SeqCst) {
+                        let code = sess.exit.lock().unwrap().unwrap_or(0);
+                        let _ = sframe::write(&mut w, sframe::EXIT, &code.to_be_bytes()).await;
+                    }
+                    break;
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(50)), if !viewer.dirty.load(O::SeqCst) => {}
+            _ = std::future::ready(()), if viewer.dirty.load(O::SeqCst) => {}
+        }
+        if reader.is_finished() {
+            break;
+        }
+    }
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut w).await;
     reader.abort();
 }

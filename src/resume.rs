@@ -282,16 +282,26 @@ async fn pump(
 mod tests {
     use super::*;
 
-    /// Two pumps over in-memory "QUIC streams"; the link is cut in the middle and reattached.
+    /// A wire between two pumps through a relay task; aborting the relay is a real cut (in-flight bytes
+    /// are lost, both ends see the stream die).
+    fn wire() -> (Transport, Transport, tokio::task::JoinHandle<()>) {
+        let (a, mut a_relay) = tokio::io::duplex(1 << 16);
+        let (b, mut b_relay) = tokio::io::duplex(1 << 16);
+        let relay = tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut a_relay, &mut b_relay).await;
+        });
+        let (ar, aw) = tokio::io::split(a);
+        let (br, bw) = tokio::io::split(b);
+        (
+            Transport { send: Box::new(aw), recv: Box::new(ar), peer_received: 0 },
+            Transport { send: Box::new(bw), recv: Box::new(br), peer_received: 0 },
+            relay,
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn survives_a_cut() {
-        let wire = || {
-            let (a, b) = tokio::io::duplex(1 << 16);
-            let (ar, aw) = tokio::io::split(a);
-            let (br, bw) = tokio::io::split(b);
-            (Transport { send: Box::new(aw), recv: Box::new(ar), peer_received: 0 }, Transport { send: Box::new(bw), recv: Box::new(br), peer_received: 0 })
-        };
-        let (t1, t2) = wire();
+        let (t1, t2, relay) = wire();
         let (mut left, left_attach, _) = start(t1, Duration::from_secs(10), None);
         let (mut right, right_attach, _) = start(t2, Duration::from_secs(10), None);
 
@@ -301,19 +311,31 @@ mod tests {
         right.read_exact(&mut got).await.unwrap();
         assert_eq!(got, first);
 
-        // Cut: give both pumps a new wire, each told what the other received.
-        let (mut n1, mut n2) = wire();
+        // Cut while more data is being written: some of it is lost in flight.
+        let second: Vec<u8> = (0..300_000u32).map(|i| (i % 13) as u8).collect();
+        let writer = {
+            let second = second.clone();
+            tokio::spawn(async move {
+                left.write_all(&second).await.unwrap();
+                left
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        relay.abort();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Reconnect: each side is told what the other received.
+        let (mut n1, mut n2, _relay2) = wire();
         n1.peer_received = right_attach.received.load(Ordering::SeqCst);
         n2.peer_received = left_attach.received.load(Ordering::SeqCst);
         left_attach.tx.send(n1).unwrap();
         right_attach.tx.send(n2).unwrap();
 
-        let second: Vec<u8> = (0..50_000u32).map(|i| (i % 13) as u8).collect();
-        left.write_all(&second).await.unwrap();
-        right.write_all(b"back").await.unwrap();
         let mut got = vec![0u8; second.len()];
         right.read_exact(&mut got).await.unwrap();
-        assert_eq!(got, second);
+        assert_eq!(got, second, "every byte once, in order");
+        let mut left = writer.await.unwrap();
+        right.write_all(b"back").await.unwrap();
         let mut back = [0u8; 4];
         left.read_exact(&mut back).await.unwrap();
         assert_eq!(&back, b"back");

@@ -6,6 +6,8 @@ set -e
 mkdir -p "$CACHE" "$OUT"
 OS="$(cat build-target)"
 export GANGLI_BUILD="$(cat build-number)"
+# the owner's release key (public half): binaries built with it accept signed updates
+[ -f release-pub ] && export GANGLI_RELEASE_PUB="$(cat release-pub)"
 export CARGO_TARGET_DIR="$CACHE/target"
 export CARGO_HOME="$CACHE/cargo-home"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"

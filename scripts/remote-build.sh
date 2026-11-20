@@ -43,6 +43,11 @@ for OS in $ONLY; do cp out/box-$OS/gangli-* out/release/; done
 # keep the lock file the build resolved (same on every OS for the same tree)
 for OS in $ONLY; do [ -f out/box-$OS/Cargo.lock ] && cp out/box-$OS/Cargo.lock Cargo.lock && break; done
 (cd out/release && sha256sum gangli-* > SHA256SUMS)
+# sign every binary with the owner's release key (.tools/release.key), using the binary for this computer
+if [ -f .tools/release.key ]; then
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) HOSTBIN=out/release/gangli-windows-x86_64.exe;; Darwin) HOSTBIN=out/release/gangli-macos-universal;; *) HOSTBIN=out/release/gangli-linux-$(uname -m);; esac
+  if [ -x "$HOSTBIN" ] || [ -f "$HOSTBIN" ]; then "$HOSTBIN" release sign --key .tools/release.key out/release/gangli-*[!g] && echo "signed"; fi
+fi
 ls -la out/release
 [ "$RELEASE" = 1 ] || exit 0
 gh release create "build-$N" out/release/* --target "$(git rev-parse HEAD)" --title "gangli build $N" \

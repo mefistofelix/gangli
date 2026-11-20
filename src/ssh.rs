@@ -99,10 +99,19 @@ pub fn default_launchers() -> Vec<Launcher> {
 
 /// `user+machine` → (user, machine); `machine` alone → (`default`, machine).
 pub fn parse_login(s: &str) -> (String, String) {
-    match s.split_once('+') {
-        Some((u, m)) if !u.is_empty() => (u.to_string(), m.to_string()),
-        Some((_, m)) => ("default".into(), m.to_string()),
-        None => ("default".into(), s.to_string()),
+    let (u, m, _) = parse_login_full(s);
+    (u, m)
+}
+
+/// `user+machine+name` also names a persistent terminal to attach to (started if missing).
+pub fn parse_login_full(s: &str) -> (String, String, Option<String>) {
+    let parts: Vec<&str> = s.split('+').collect();
+    let user = |u: &str| if u.is_empty() { "default".to_string() } else { u.to_string() };
+    match parts.as_slice() {
+        [m] => ("default".into(), m.to_string(), None),
+        [u, m] => (user(u), m.to_string(), None),
+        [u, m, t, ..] => (user(u), m.to_string(), Some(t.to_string()).filter(|t| !t.is_empty())),
+        [] => ("default".into(), String::new(), None),
     }
 }
 
@@ -253,6 +262,8 @@ struct Target {
     net: String,
     node: String,
     user: String,
+    /// Persistent terminal to attach to (`user+machine+name`).
+    term: Option<String>,
 }
 
 #[derive(Default)]
@@ -281,7 +292,7 @@ fn reject() -> Auth {
 impl Conn {
     /// Resolve `user+machine` and check the credential against the best rule.
     fn login(&mut self, login: &str, ok: impl Fn(&LoginRule) -> bool) -> Auth {
-        let (user, machine) = parse_login(login);
+        let (user, machine, term) = parse_login_full(login);
         let Ok((net, net_name, node)) = console::find_node(&self.c, &machine) else { return reject() };
         let name = self.c.node_name(&net, &node).unwrap_or_default();
         let names = vec![name.clone(), format!("{name}.{net_name}"), node.clone()];
@@ -289,7 +300,7 @@ impl Conn {
         match best_rules(&rules, &names, &user).into_iter().find(|r| ok(r)) {
             Some(_) => {
                 console::clog(&format!("SSH login {user}+{name}"));
-                self.target = Some(Target { net, node, user });
+                self.target = Some(Target { net, node, user, term });
                 Auth::Accept
             }
             _ => reject(),
@@ -304,11 +315,18 @@ impl Conn {
         let chan = self.chans.entry(channel).or_default();
         let (tx, rx) = mpsc::unbounded_channel();
         chan.tx = Some(tx);
-        let req = Req::Shell {
-            user: t.user.clone(),
-            command,
-            pty: chan.pty,
-            term: if chan.term.is_empty() { "xterm-256color".into() } else { chan.term.clone() },
+        let req = match (&t.term, &command) {
+            // A shell request with a terminal name: attach to the persistent terminal.
+            (Some(name), None) => {
+                let (cols, rows) = chan.pty.unwrap_or((80, 24));
+                Req::Attach { name: name.clone(), user: t.user.clone(), cols, rows }
+            }
+            _ => Req::Shell {
+                user: t.user.clone(),
+                command,
+                pty: chan.pty,
+                term: if chan.term.is_empty() { "xterm-256color".into() } else { chan.term.clone() },
+            },
         };
         let (c, net, node, handle) = (self.c.clone(), t.net.clone(), t.node.clone(), session.handle());
         session.channel_success(channel)?;
@@ -527,6 +545,8 @@ mod tests {
         assert_eq!(parse_login("root+nas"), ("root".into(), "nas".into()));
         assert_eq!(parse_login("nas.home"), ("default".into(), "nas.home".into()));
         assert_eq!(parse_login("desktop+nonna-pc"), ("desktop".into(), "nonna-pc".into()));
+        assert_eq!(parse_login_full("root+nas+work"), ("root".into(), "nas".into(), Some("work".into())));
+        assert_eq!(parse_login_full("+nas+work"), ("default".into(), "nas".into(), Some("work".into())));
     }
 
     #[test]

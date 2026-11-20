@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use data_encoding::HEXLOWER;
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -77,6 +77,12 @@ pub struct ConsoleConf {
     /// Token of the local CLI / GUI (made on first start).
     #[serde(default)]
     pub token: String,
+    /// Own iroh relays (`https://relay.example.org`); empty: the public n0 relays (docs/RELAY.md).
+    #[serde(default)]
+    pub relays: Vec<String>,
+    /// With own relays, keep the n0 ones as a fallback.
+    #[serde(default = "yes")]
+    pub relays_n0_fallback: bool,
 }
 
 fn default_port() -> u16 {
@@ -85,7 +91,7 @@ fn default_port() -> u16 {
 
 impl Default for ConsoleConf {
     fn default() -> Self {
-        ConsoleConf { key: String::new(), port: default_port(), token: String::new() }
+        ConsoleConf { key: String::new(), port: default_port(), token: String::new(), relays: vec![], relays_n0_fallback: true }
     }
 }
 
@@ -232,7 +238,11 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
     } else {
         None
     };
-    let ep = Endpoint::builder(presets::N0).secret_key(sk).bind().await.ctx("start endpoint")?;
+    let mut builder = Endpoint::builder(presets::N0).secret_key(sk);
+    if let Some(m) = crate::util::relay_mode(&state.console.relays, state.console.relays_n0_fallback)? {
+        builder = builder.relay_mode(m);
+    }
+    let ep = builder.bind().await.ctx("start endpoint")?;
     let c = Arc::new(Console {
         me,
         open,
@@ -942,7 +952,8 @@ async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
     };
     if let Caller::Token(scope) = &who {
         let allowed = match op.scope() {
-            Some("read") => scope == "read" || scope == "admin",
+            Some("read") => scope == "read" || scope == "exec" || scope == "admin",
+            Some("exec") => scope == "exec" || scope == "admin",
             Some("admin") => scope == "admin",
             _ => false,
         };
@@ -1168,8 +1179,8 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             Ok(api_json(&st.api, st.console.port))
         }
         IpcOp::ApiTokenAdd { name, scope } => {
-            if scope != "read" && scope != "admin" {
-                bail!("scope must be read or admin");
+            if scope != "read" && scope != "exec" && scope != "admin" {
+                bail!("scope must be read, exec or admin");
             }
             let token = format!("gat_{}", HEXLOWER.encode(&random16()));
             let (enabled, port) = {
@@ -1306,8 +1317,14 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             c.save();
             Ok(json!({ "removed": index }))
         }
-        IpcOp::Launch { node, launcher, user } => {
+        IpcOp::Launch { node, launcher, user, term } => {
             let (login, password, port, node_name) = login_for(c, &node, user.as_deref())?;
+            // `user+machine+name`: attach to (or start) the persistent terminal `name`.
+            let login = match (&term, &user) {
+                (Some(t), Some(_)) => format!("{login}+{t}"),
+                (Some(t), None) => format!("+{login}+{t}"),
+                (None, _) => login,
+            };
             let (name, command) = {
                 let st = c.state.lock().unwrap();
                 let l = match &launcher {
@@ -1332,6 +1349,130 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 ],
             );
             Ok(json!({ "launcher": name, "argv": argv, "gateway_open": c.open }))
+        }
+        IpcOp::Exec { node, user, command, timeout } => {
+            use crate::proto::sframe;
+            let (net, net_name, id) = find_node(c, &node)?;
+            let req = Req::Shell { user: user.unwrap_or_else(|| "default".into()), command: Some(command), pty: None, term: String::new() };
+            let (app, resp) = open_resumable(c, &net, &id, req, Duration::from_secs(3600)).await?;
+            if !matches!(resp, Resp::Started) {
+                bail!("unexpected answer");
+            }
+            let (mut r, mut w) = tokio::io::split(app);
+            // No input: close the command's stdin (the stream itself stays open until it exits).
+            sframe::write(&mut w, sframe::EOF, &[]).await?;
+            const CAP: usize = 8 << 20;
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let limit = Duration::from_secs(timeout.unwrap_or(300).max(1));
+            let collected = tokio::time::timeout(limit, async {
+                loop {
+                    let (kind, body) = sframe::read(&mut r).await?;
+                    match kind {
+                        sframe::DATA if out.len() < CAP => out.extend_from_slice(&body),
+                        sframe::STDERR if err.len() < CAP => err.extend_from_slice(&body),
+                        sframe::EXIT if body.len() >= 4 => return Ok::<i32, anyhow::Error>(i32::from_be_bytes(body[..4].try_into().unwrap())),
+                        _ => {}
+                    }
+                }
+            })
+            .await;
+            let (code, timed_out) = match collected {
+                Ok(Ok(code)) => (Some(code), false),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => (None, true),
+            };
+            drop(w);
+            Ok(json!({
+                "node": node, "network": net_name, "exit": code, "timed_out": timed_out,
+                "stdout": String::from_utf8_lossy(&out), "stderr": String::from_utf8_lossy(&err),
+            }))
+        }
+        IpcOp::JobStart { node, user, command } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            match proto::request(&conn, &Req::JobStart { user: user.unwrap_or_else(|| "default".into()), command }).await? {
+                Resp::Job { id } => Ok(json!({ "node": node, "job": id })),
+                _ => bail!("unexpected answer"),
+            }
+        }
+        IpcOp::JobList { node } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            match proto::request(&conn, &Req::JobList).await? {
+                Resp::Jobs { jobs } => Ok(json!({ "node": node, "jobs": jobs })),
+                _ => bail!("unexpected answer"),
+            }
+        }
+        IpcOp::JobOutput { node, job, from } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            match proto::request(&conn, &Req::JobOutput { id: job, from: from.unwrap_or(0) }).await? {
+                Resp::JobOutput { data, from, next, running, exit } => Ok(json!({ "node": node, "data": data, "from": from, "next": next, "running": running, "exit": exit })),
+                _ => bail!("unexpected answer"),
+            }
+        }
+        IpcOp::JobKill { node, job } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            proto::request(&conn, &Req::JobKill { id: job.clone() }).await?;
+            Ok(json!({ "node": node, "killed": job }))
+        }
+        IpcOp::Update { nodes, from } => {
+            let dir = std::path::PathBuf::from(&from);
+            let targets: Vec<(String, String, String)> = if nodes.is_empty() {
+                let st = c.state.lock().unwrap();
+                let live = c.live.lock().unwrap();
+                st.networks.iter().flat_map(|n| n.nodes.iter().filter(|x| live.contains_key(&x.id)).map(|x| (n.id.clone(), x.id.clone(), x.name.clone()))).collect()
+            } else {
+                nodes.iter().map(|n| find_node(c, n).map(|(net, _, id)| (net, id.clone(), n.clone()))).collect::<Result<Vec<_>>>()?
+            };
+            let mut results = vec![];
+            for (net, id, name) in targets {
+                let r: Result<String> = async {
+                    let inv = c.state.lock().unwrap().networks.iter().flat_map(|n| n.nodes.iter()).find(|x| x.id == id).and_then(|x| x.inventory.clone());
+                    let inv = inv.ok_or_else(|| anyhow!("not online"))?;
+                    if inv.platform.is_empty() {
+                        bail!("it runs an older gangli without updates: replace its binary by hand once");
+                    }
+                    let asset = crate::update::asset_for(&inv.platform, &inv.arch).ok_or_else(|| anyhow!("no release for {} {}", inv.platform, inv.arch))?;
+                    let bytes = tokio::fs::read(dir.join(asset)).await.with_context(|| format!("{asset} not in {from}"))?;
+                    let sig = tokio::fs::read_to_string(dir.join(format!("{asset}.sig"))).await.with_context(|| format!("{asset}.sig not in {from}"))?;
+                    crate::update::verify(&bytes, &sig)?;
+                    let conn = ensure_live(c, &net, &id).await?;
+                    let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
+                    proto::write_frame(&mut send, &Req::Update { size: bytes.len() as u64, sig }).await?;
+                    send.write_all(&bytes).await.ctx("send")?;
+                    let _ = send.finish();
+                    match tokio::time::timeout(Duration::from_secs(120), proto::read_frame::<_, Resp>(&mut recv)).await {
+                        Ok(Ok(Resp::Updating)) => Ok(format!("{asset} (was {})", inv.version)),
+                        Ok(Ok(Resp::Error { message })) => bail!("{message}"),
+                        Ok(Ok(_)) => bail!("unexpected answer"),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => bail!("no answer"),
+                    }
+                }
+                .await;
+                clog(&format!("update {name}: {}", match &r { Ok(a) => a.clone(), Err(e) => format!("{e:#}") }));
+                results.push(match r {
+                    Ok(a) => json!({ "node": name, "ok": true, "asset": a }),
+                    Err(e) => json!({ "node": name, "ok": false, "error": format!("{e:#}") }),
+                });
+            }
+            Ok(json!(results))
+        }
+        IpcOp::TermList { node } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            match proto::request(&conn, &Req::TermList).await? {
+                Resp::Terms { terms } => Ok(json!({ "node": node, "terms": terms })),
+                _ => bail!("unexpected answer"),
+            }
+        }
+        IpcOp::TermKill { node, name } => {
+            let (net, _, id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net, &id).await?;
+            proto::request(&conn, &Req::TermKill { name: name.clone() }).await?;
+            Ok(json!({ "node": node, "killed": name }))
         }
         IpcOp::DebugDrop { node } => {
             let (_, _, id) = find_node(c, &node)?;

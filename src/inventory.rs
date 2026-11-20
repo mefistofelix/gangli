@@ -10,6 +10,9 @@ pub struct Inventory {
     pub os_version: String,
     pub kernel: String,
     pub arch: String,
+    /// `windows`, `linux`, `macos` (picks the release asset for updates).
+    #[serde(default)]
+    pub platform: String,
     pub cpus: usize,
     pub cpu: String,
     /// Bytes.
@@ -98,6 +101,7 @@ pub fn collect() -> Inventory {
         os_version: System::long_os_version().lenient(),
         kernel: System::kernel_version().lenient(),
         arch: std::env::consts::ARCH.to_string(),
+        platform: std::env::consts::OS.to_string(),
         uptime: System::uptime().lenient(),
         version: crate::build_version(),
         full_access: crate::elevate::is_root(),

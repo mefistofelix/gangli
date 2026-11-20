@@ -58,6 +58,28 @@ pub struct ConsoleRec {
     pub seen: u64,
 }
 
+/// A persistent terminal on a node.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TermInfo {
+    pub name: String,
+    pub user: String,
+    pub started: u64,
+    pub attached: usize,
+}
+
+/// A background job on a node.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct JobInfo {
+    pub id: String,
+    pub user: String,
+    pub command: String,
+    pub started: u64,
+    pub running: bool,
+    pub exit: Option<i32>,
+    /// Bytes of output so far (stdout and stderr together).
+    pub output: u64,
+}
+
 /// What a new node gets back when its join secret is accepted.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Admission {
@@ -100,6 +122,17 @@ pub enum Req {
     Stream { id: String, inner: Box<Req> },
     /// Console → node, after a drop: reattach stream `id`; `received` = bytes the console got so far.
     Resume { id: String, received: u64 },
+    /// Console → node: background jobs, which keep running (and buffering their output) without a console.
+    JobStart { user: String, command: String },
+    JobList,
+    JobOutput { id: String, from: u64 },
+    JobKill { id: String },
+    /// Console → node: a new binary follows (`size` raw bytes after this frame), signed with the release key.
+    Update { size: u64, sig: String },
+    /// Console → node, inside a `Stream`: attach to the persistent terminal `name` (started if missing).
+    Attach { name: String, user: String, cols: u16, rows: u16 },
+    TermList,
+    TermKill { name: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -115,6 +148,11 @@ pub enum Resp {
     Forwarding,
     Started,
     Resumed { received: u64 },
+    Updating,
+    Terms { terms: Vec<TermInfo> },
+    Job { id: String },
+    Jobs { jobs: Vec<JobInfo> },
+    JobOutput { data: String, from: u64, next: u64, running: bool, exit: Option<i32> },
     Error { message: String },
 }
 

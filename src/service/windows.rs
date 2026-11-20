@@ -41,7 +41,16 @@ pub fn install(o: &super::InstallOpts) -> io::Result<()> {
     let service = manager
         .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
         .map_err(to_io)?;
-    let _ = service.set_description("Peer-to-peer remote management agent and control center.");
+    let _ = service.set_description("gangli remote management: this machine as a managed node.");
+    // Restart after any exit: crashes, and the deliberate exit after a self-update.
+    let restart = || windows_service::service::ServiceAction { action_type: windows_service::service::ServiceActionType::Restart, delay: Duration::from_secs(5) };
+    let _ = service.update_failure_actions(windows_service::service::ServiceFailureActions {
+        reset_period: windows_service::service::ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart(), restart(), restart()]),
+    });
+    let _ = service.set_failure_actions_on_non_crash_failures(true);
     service.start::<&str>(&[]).map_err(to_io)?;
     println!("installed and started the gangli service");
     Ok(())

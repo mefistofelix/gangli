@@ -22,6 +22,8 @@ mod sftp;
 mod ssh;
 mod state;
 mod store;
+mod term;
+mod update;
 mod util;
 
 use std::sync::atomic::AtomicBool;
@@ -117,10 +119,43 @@ enum Command {
         /// Account on the machine (default: its desktop user, else the service account).
         #[arg(long)]
         user: Option<String>,
+        /// Attach to (or start) the persistent terminal with this name.
+        #[arg(long)]
+        term: Option<String>,
     },
+    /// console: persistent terminals of a machine (they keep running when you disconnect).
+    #[command(subcommand)]
+    Term(TermCmd),
     /// node: SFTP server on stdin / stdout (started by the node for SFTP sessions).
     #[command(hide = true, name = "sftp-server")]
     SftpServer,
+    /// console: run a command on a machine and wait: its output and exit code (for scripts and LLMs).
+    Exec {
+        node: String,
+        /// Account on the machine (default: its desktop user, else the service account).
+        #[arg(long)]
+        user: Option<String>,
+        /// Give up after this many seconds (default 300).
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// The command (after `--`).
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// console: background jobs on a machine: they keep running and keep their output without a console.
+    #[command(subcommand)]
+    Job(JobCmd),
+    /// console: send the machines a signed new release (from a folder: `gh release download build-N -D <dir>`).
+    Update {
+        /// Machines (default: every machine online now).
+        nodes: Vec<String>,
+        /// Folder with the release binaries and their `.sig` files.
+        #[arg(long)]
+        from: String,
+    },
+    /// Release key: make it once, sign releases (used by scripts/remote-build.sh).
+    #[command(subcommand, hide = true)]
+    Release(ReleaseCmd),
     /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
     #[command(hide = true, name = "debug-drop")]
     DebugDrop { node: String },
@@ -168,6 +203,52 @@ enum ApiCmd {
     /// Access tokens.
     #[command(subcommand)]
     Token(TokenCmd),
+}
+
+#[derive(Subcommand)]
+enum TermCmd {
+    /// The persistent terminals of a machine.
+    List { node: String },
+    /// End a persistent terminal (its shell is killed).
+    Kill { node: String, name: String },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Make the release key (prints its public half, to put in .tools/release.pub).
+    Keygen {
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Write `<file>.sig` for each file.
+    Sign {
+        #[arg(long)]
+        key: std::path::PathBuf,
+        files: Vec<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCmd {
+    /// Start a command in the background.
+    Start {
+        node: String,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// The jobs of a machine.
+    List { node: String },
+    /// A job's output (`--follow` until it ends).
+    Output {
+        node: String,
+        job: String,
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Stop a job.
+    Kill { node: String, job: String },
 }
 
 #[derive(Subcommand)]
@@ -371,8 +452,20 @@ fn main() {
             },
             json,
         ),
-        Some(Command::Open { node, launcher, user }) => console_cmd::open(&node, launcher, user, json),
+        Some(Command::Open { node, launcher, user, term }) => console_cmd::open(&node, launcher, user, term, json),
+        Some(Command::Term(TermCmd::List { node })) => console_cmd::term(ipc::IpcOp::TermList { node }, json),
+        Some(Command::Term(TermCmd::Kill { node, name })) => console_cmd::term(ipc::IpcOp::TermKill { node, name }, json),
         Some(Command::SftpServer) => sftp::serve().map_err(io_err),
+        Some(Command::Exec { node, user, timeout, command }) => console_cmd::exec(&node, user, timeout, command.join(" "), json),
+        Some(Command::Job(j)) => match j {
+            JobCmd::Start { node, user, command } => console_cmd::job(ipc::IpcOp::JobStart { node, user, command: command.join(" ") }, json),
+            JobCmd::List { node } => console_cmd::job(ipc::IpcOp::JobList { node }, json),
+            JobCmd::Output { node, job, follow } => console_cmd::job_output(&node, &job, follow, json),
+            JobCmd::Kill { node, job } => console_cmd::job(ipc::IpcOp::JobKill { node, job }, json),
+        },
+        Some(Command::Update { nodes, from }) => console_cmd::update(nodes, from, json),
+        Some(Command::Release(ReleaseCmd::Keygen { out })) => update::keygen(&out).map(|p| println!("{p}")),
+        Some(Command::Release(ReleaseCmd::Sign { key, files })) => update::sign(&key, &files),
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
     };
     if let Err(e) = result {

@@ -60,6 +60,9 @@ src/http.rs           minimal HTTP/1.1 of the local API (no dependency)
 src/ssh.rs            console SSH gateway (russh): user+machine logins, rules, launchers, forwards
 src/proc.rs           node: shell / command with ConPTY or /dev/ptmx, as system / desktop / a user
 src/sftp.rs           SFTP v3 server, run by the node as `gangli sftp-server` in the user's process
+src/resume.rs         resumable streams (sessions, forwards survive drops)
+src/term.rs           persistent terminals (alacritty_terminal screen, redraw, state sync)
+src/update.rs         release key, signatures, verified self-update
 src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
 src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
 src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers
@@ -93,6 +96,9 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
   `macos-latest` (universal, ad-hoc signed).
 - Toolchains (rustup, zig, cargo-zigbuild) and the target dir are kept in `$CACHE`, per OS.
 - Logs come back in `out/box-<os>/build.log`.
+- Release key: `.tools/release.key` (secret, git-ignored, never print it) and `.tools/release.pub`; made once
+  with `gangli release keygen`. With them the build bakes the public half in and signs every binary.
+- Builds hit GitHub's API limit (5000 requests / hour; box.sh polls): batch changes, build rarely.
 - Push HEAD before a release build (the script checks it). The release `build-N` (N = newest + 1, also the
   version `0.0.N` baked into the binary through `GANGLI_BUILD`) of this **private** repository gets
   `gangli-linux-x86_64`, `gangli-linux-aarch64`, `gangli-windows-x86_64.exe`, `gangli-macos-universal` and

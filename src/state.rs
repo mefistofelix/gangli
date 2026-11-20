@@ -24,7 +24,7 @@ pub struct State {
     pub networks: Vec<Membership>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NodeConf {
     /// The node's secret key (hex), made on first start.
     #[serde(default)]
@@ -35,6 +35,22 @@ pub struct NodeConf {
     /// Account of the service (empty: SYSTEM / root).
     #[serde(default)]
     pub service_user: String,
+    /// Own iroh relays (`https://relay.example.org`); empty: the public n0 relays (docs/RELAY.md).
+    #[serde(default)]
+    pub relays: Vec<String>,
+    /// With own relays, keep the n0 ones as a fallback.
+    #[serde(default = "yes")]
+    pub relays_n0_fallback: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for NodeConf {
+    fn default() -> Self {
+        NodeConf { key: String::new(), installed: false, service_user: String::new(), relays: vec![], relays_n0_fallback: true }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
