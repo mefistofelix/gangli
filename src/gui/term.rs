@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
@@ -62,6 +62,8 @@ struct Screen {
     term: Term<Listener>,
     parser: Processor,
     state: State,
+    /// Counts the output received (predictions are dropped when it changes).
+    output: u64,
 }
 
 pub struct TermTab {
@@ -74,6 +76,25 @@ pub struct TermTab {
     id: egui::Id,
     scroll_rest: f32,
     focus_once: bool,
+    /// Predictive echo: typed text shown at the cursor until the machine's echo arrives.
+    predict: Predict,
+}
+
+/// Local echo on slow links, the way mosh does it, simplified: predictions start on a line only once the
+/// machine has echoed what was typed there (so a password prompt, which does not echo, never shows them),
+/// and any output from the machine replaces them.
+#[derive(Default)]
+struct Predict {
+    pending: String,
+    /// The machine echoes on this line.
+    line_echoes: bool,
+    /// Cursor when text was last typed, and the output count then: echo detection.
+    typed_at: Option<(i32, usize, u64)>,
+    seen_output: u64,
+    /// Shown only when the echo is late (fast links never see them).
+    since: Option<std::time::Instant>,
+    /// Where the predicted text starts (line, column): echoed characters are taken off its front.
+    base: Option<(i32, usize)>,
 }
 
 const BG: Color32 = Color32::from_rgb(24, 24, 27);
@@ -145,7 +166,7 @@ impl TermTab {
         let title = Arc::new(Mutex::new(None));
         let listener = Listener { tx: tx.clone(), title: title.clone() };
         let term = Term::new(Config::default(), &TermSize::new(80, 24), listener);
-        let screen = Arc::new(Mutex::new(Screen { term, parser: Processor::new(), state: State::Connecting }));
+        let screen = Arc::new(Mutex::new(Screen { term, parser: Processor::new(), state: State::Connecting, output: 0 }));
         let (s2, w2) = (screen.clone(), wake.clone());
         let user = user.unwrap_or_else(|| "default".into());
         rt.spawn(async move {
@@ -188,8 +209,9 @@ impl TermTab {
                 match sframe::read(&mut recv).await {
                     Ok((sframe::DATA, body)) | Ok((sframe::STDERR, body)) => {
                         let mut g = s2.lock().unwrap();
-                        let Screen { term, parser, .. } = &mut *g;
+                        let Screen { term, parser, output, .. } = &mut *g;
                         parser.advance(term, &body);
+                        *output += 1;
                         drop(g);
                         w2();
                     }
@@ -202,7 +224,7 @@ impl TermTab {
             s2.lock().unwrap().state = State::Exited(code);
             w2();
         });
-        TermTab { label, screen, tx, title, size: (80, 24), id: egui::Id::unique(("term", rand_id())), scroll_rest: 0.0, focus_once: true }
+        TermTab { label, screen, tx, title, size: (80, 24), id: egui::Id::unique(("term", rand_id())), scroll_rest: 0.0, focus_once: true, predict: Predict::default() }
     }
 
     pub fn title(&self) -> String {
@@ -286,14 +308,55 @@ impl TermTab {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         }
 
+        // Output from the machine replaces the predictions; did it echo what was typed?
+        if g.output != self.predict.seen_output {
+            self.predict.seen_output = g.output;
+            let c = g.term.grid().cursor.point;
+            match self.predict.base {
+                // Echo arrived for part of it: keep the rest.
+                Some((line, col)) if c.line.0 == line && c.column.0 >= col => {
+                    let echoed = c.column.0 - col;
+                    self.predict.pending = self.predict.pending.chars().skip(echoed).collect();
+                    self.predict.base = Some((line, c.column.0));
+                }
+                _ => self.predict.pending.clear(),
+            }
+            if self.predict.pending.is_empty() {
+                self.predict.base = None;
+            }
+            if let Some((line, col, _)) = self.predict.typed_at.take() {
+                let c = g.term.grid().cursor.point;
+                if c.line.0 == line && c.column.0 > col {
+                    self.predict.line_echoes = true;
+                }
+            }
+        }
+
         // Keyboard.
         if focused {
             let mode = *g.term.mode();
             let app_cursor = mode.contains(TermMode::APP_CURSOR);
             let mut out: Vec<u8> = vec![];
+            let mut typed = String::new();
             for e in ui.input(|i| i.events.clone()) {
                 match e {
-                    egui::Event::Text(t) => out.extend_from_slice(t.as_bytes()),
+                    egui::Event::Text(t) => {
+                        out.extend_from_slice(t.as_bytes());
+                        typed.push_str(&t);
+                    }
+                    egui::Event::Key { key: Key::Backspace, pressed: true, modifiers, .. } if !modifiers.ctrl && !self.predict.pending.is_empty() => {
+                        self.predict.pending.pop();
+                        out.extend_from_slice(b"\x7f");
+                    }
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if key_bytes(key, modifiers, app_cursor).is_some() => {
+                        // Anything but plain typing: no prediction until the machine answers; a new line (or
+                        // Ctrl / Esc) may be a prompt that does not echo.
+                        self.predict.pending.clear();
+                        if matches!(key, Key::Enter | Key::Escape) || modifiers.ctrl {
+                            self.predict.line_echoes = false;
+                        }
+                        out.extend_from_slice(&key_bytes(key, modifiers, app_cursor).unwrap_or_default());
+                    }
                     egui::Event::Paste(t) => {
                         let t = t.replace("\r\n", "\r").replace('\n', "\r");
                         if mode.contains(TermMode::BRACKETED_PASTE) {
@@ -304,12 +367,20 @@ impl TermTab {
                             out.extend_from_slice(t.as_bytes());
                         }
                     }
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        if let Some(b) = key_bytes(key, modifiers, app_cursor) {
-                            out.extend_from_slice(&b);
-                        }
-                    }
                     _ => {}
+                }
+            }
+            if !typed.is_empty() {
+                if self.predict.line_echoes && !mode.contains(TermMode::ALT_SCREEN) {
+                    if self.predict.pending.is_empty() {
+                        let c = g.term.grid().cursor.point;
+                        self.predict.base = Some((c.line.0, c.column.0));
+                    }
+                    self.predict.pending.push_str(&typed);
+                }
+                if self.predict.typed_at.is_none() {
+                    let c = g.term.grid().cursor.point;
+                    self.predict.typed_at = Some((c.line.0, c.column.0, g.output));
                 }
             }
             if !out.is_empty() {
@@ -404,8 +475,32 @@ impl TermTab {
         }
         flush(&mut run, run_at);
         let cursor_row = cursor.line.0 + offset as i32;
+        let mut cursor_col = cursor.column.0;
+        // Predicted echo: typed text not yet echoed by the machine, underlined, at the cursor, once the echo is late.
+        if self.predict.pending.is_empty() {
+            self.predict.since = None;
+        } else if self.predict.since.is_none() {
+            self.predict.since = Some(std::time::Instant::now());
+            ui.ctx().request_repaint_after(Duration::from_millis(45));
+        }
+        let late = self.predict.since.is_some_and(|t| t.elapsed() >= Duration::from_millis(40));
+        if late && offset == 0 && cursor_row >= 0 && (cursor_row as usize) < rows as usize {
+            let color = FG.gamma_multiply(0.8);
+            for ch_ in self.predict.pending.chars() {
+                if cursor_col >= cols as usize {
+                    break;
+                }
+                let r = cell_rect(cursor_row as usize, cursor_col, 1);
+                painter.rect_filled(r, 0.0, BG);
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&ch_.to_string(), 0.0, egui::TextFormat { font_id: font.clone(), color, underline: egui::Stroke::new(1.0, color), ..Default::default() });
+                let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                painter.galley(r.min, galley, color);
+                cursor_col += 1;
+            }
+        }
         if show_cursor && cursor_row >= 0 && (cursor_row as usize) < rows as usize {
-            let r = cell_rect(cursor_row as usize, cursor.column.0, 1);
+            let r = cell_rect(cursor_row as usize, cursor_col.min(cols as usize - 1), 1);
             if focused {
                 painter.rect_filled(r, 0.0, FG.gamma_multiply(0.55));
             } else {

@@ -149,8 +149,8 @@ Three layers, each one independent:
    session; `gangli term list|kill`. alacritty_terminal keeps its screen; whoever attaches gets it redrawn
    exactly, then the live output. Each viewer has a small queue: when the link is too slow and it fills up,
    the intermediate output is dropped and the viewer gets the current screen instead (**state sync**, as
-   mosh does), so `cat bigfile` on a mobile link costs one screen. Predictive local echo would need our own
-   terminal client; with PuTTY / OpenSSH it is not possible (later, in the GUI terminal).
+   mosh does), so `cat bigfile` on a mobile link costs one screen. Predictive local echo needs our own
+   terminal client: the GUI's integrated terminal has it (section 12); PuTTY / OpenSSH cannot.
 
 **For scripts and LLMs**: `gangli exec <machine> [--user U] -- command` runs a command and returns its stdout,
 stderr and exit code (`--json`: one object; API `{"op":"exec",…}`, token scope `exec`), over a resumable
@@ -356,7 +356,11 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   keeps the screen, egui draws it (256 colours and truecolor, bold, underline, wide characters); xterm keys,
   bracketed paste, answers to the program's queries; drag selects and copies, right click or Ctrl+V pastes,
   the wheel scrolls back. Unix sessions get the system language (else `C.UTF-8`): without it shells drop
-  accented input. Not yet: predictive local echo.
+  accented input. **Predictive echo** on slow links (mosh-like, simplified): when the echo is late (> 40 ms)
+  typed text shows at once, underlined, and echoed characters replace it as they come; predictions start
+  on a line only after the machine has echoed something typed there, so a prompt without echo (password)
+  never shows them; Enter, Esc or Ctrl stop them until the next echo. Verified with 250 ms of `tc netem`
+  delay each way.
 - The GUI **is** a console: it opens one in its process (owning the local port, the gateway, the tunnels).
   If a console is already open in the folder: a GUI there is brought up instead (`GuiShow` over the local
   API, the second process exits), a `gangli console run` is used through its local API.
@@ -441,4 +445,4 @@ called for core features.
 5. Resumable streams; `exec` and jobs; own relays; directory pages; signed self-update; persistent terminals
    with state sync. ✓
 6. GUI with tray (node + console unified), API tokens in the GUI. ✓
-7. Integrated terminal in the GUI. ✓ Later: predictive local echo, public code rotation, update rollback.
+7. Integrated terminal in the GUI, with predictive echo. ✓ Later: public code rotation, update rollback.
