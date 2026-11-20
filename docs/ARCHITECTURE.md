@@ -233,8 +233,9 @@ mosh-like terminal of section 6.
 terminal stream: the gateway and the node's PTY carry them untouched, so they work from Linux / macOS nodes when
 the local terminal supports them (kitty, WezTerm, Ghostty, iTerm2; Windows Terminal: sixel; not PuTTY).
 From Windows nodes ConPTY re-renders the output and most likely drops them **[verify]**. The persistent
-terminal keeps a screen state, so its VT engine must understand them: libghostty-vt does (Kitty graphics),
-alacritty_terminal does not — a reason to prefer libghostty-vt there.
+terminal keeps a screen state with **alacritty_terminal** **[decided 2026-11-20: pure Rust, simpler build;
+images are not a goal]**, which does not keep images: they work through the SSH gateway, not in the
+persistent terminal.
 
 ### Saved tunnels
 
@@ -352,7 +353,7 @@ atomically, restart, and roll back if the new version does not come back healthy
 |---|---|---|
 | P2P transport | `iroh` 1.5 | multipath, self-hostable relay; `pigeons` (same authors) is the reference for "ssh over iroh" |
 | SSH server / SFTP | `russh`, `russh-sftp` | maintained (0.6x); pick a version without RUSTSEC-2026-0007 |
-| VT engine | `alacritty_terminal` first, behind a `VtEngine` trait | pure Rust, used by Zed; **libghostty-vt** (C ABI 1.0, `ghostty-vt-sys`) is more complete but needs Zig and has MSVC link quirks |
+| VT engine | `alacritty_terminal` **[decided]** | pure Rust, used by Alacritty and Zed; libghostty-vt (more complete, Kitty graphics) set aside: needs Zig and has MSVC link quirks, images are not a goal |
 | PTY | `rustix` openpty + ConPTY via `windows-sys` | `portable-pty` (the usual wrapper) has had no release since Feb 2025 |
 | Session persistence design | study `shpool` (+ `shpool-vterm`), `osewa`, `RoSE` | shpool: detached shells + screen restore; osewa: QUIC/WS racing, predictive echo; RoSE: mosh-like over quinn |
 | Inventory | `sysinfo` 0.40 | |
