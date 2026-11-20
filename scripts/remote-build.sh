@@ -30,8 +30,8 @@ for OS in $ONLY; do
   S="$W/src-$OS"; mkdir -p "$S"
   git ls-files -co --exclude-standard -z | tar --null -T - -cf - | tar -xf - -C "$S"
   printf '%s\n' "$N" > "$S/build-number"; printf '%s\n' "$OS" > "$S/build-target"
-  # the public half of the release key goes into the binaries (they then accept signed updates)
-  [ -f .tools/release.pub ] && tr -d ' \r\n' < .tools/release.pub > "$S/release-pub"
+  # ask the runner for the end-to-end test after the build
+  if [ "$TEST" = 1 ]; then touch "$S/build-test"; fi
   printf '#!/bin/bash\nset -e\nexec bash scripts/box-build.sh\n' > "$S/build.sh"
   R="out/box-$OS"; rm -rf "$R"
   bash .tools/build-box/box.sh "$S" .tools/box-password "$R" --runner "${RUNNER[$OS]}" --cache "gangli-$OS" \
