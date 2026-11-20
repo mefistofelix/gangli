@@ -233,10 +233,13 @@ impl TermTab {
             self.screen.lock().unwrap().term.resize(TermSize::new(cols as usize, rows as usize));
             let _ = self.tx.send(ToNode::Resize(cols, rows));
         }
-        if resp.clicked() || resp.drag_started() || std::mem::take(&mut self.focus_once) {
+        if resp.clicked() || resp.drag_started() || self.focus_once {
             resp.request_focus();
         }
         let focused = resp.has_focus();
+        if focused {
+            self.focus_once = false;
+        }
         if focused {
             ui.memory_mut(|m| m.set_focus_lock_filter(self.id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
         }

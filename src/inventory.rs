@@ -141,7 +141,12 @@ pub fn collect() -> Inventory {
     }
 
     if let Ok(nets) = Networks::new_with_refreshed_list() {
-        for (_name, data) in nets.iter() {
+        for (name, data) in nets.iter() {
+            // The loopback interface can carry extra addresses (WSL puts 10.255.255.254 there).
+            let n = name.to_string_lossy();
+            if n == "lo" || n.starts_with("lo0") {
+                continue;
+            }
             for n in data.ip_networks().iter() {
                 let a = n.addr;
                 let skip = a.is_loopback()
@@ -156,8 +161,13 @@ pub fn collect() -> Inventory {
                 }
             }
         }
-        // IPv4 first: that is what people type.
-        inv.ips.sort_by_key(|s| s.contains(':'));
+        // Home-network IPv4 first (what people type), then other IPv4, then IPv6.
+        inv.ips.sort_by_key(|s| match s.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(v)) if v.octets()[0] == 192 && v.octets()[1] == 168 => 0,
+            Ok(std::net::IpAddr::V4(v)) if v.is_private() => 1,
+            Ok(std::net::IpAddr::V4(_)) => 2,
+            _ => 3,
+        });
     }
     inv
 }
