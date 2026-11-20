@@ -66,9 +66,24 @@ echo "whoami as default (the desktop user, if any): $("$G" exec "$NODE" -- whoam
 case "$WHO" in root|*system*|*SYSTEM*) ok "exec as root / SYSTEM";; *) ko "exec as root / SYSTEM ($WHO)";; esac
 "$G" exec "$NODE" -- echo hello-from-the-service | grep -q hello-from-the-service && ok "exec output" || ko "exec output"
 
+step "API for an AI agent, SSH gateway with its key"
+"$G" api enable > /dev/null
+"$G" api token add agent --scope admin --save "$T/agent.txt" && ok "admin token saved with instructions" || ko "admin token saved with instructions"
+TOKEN=$(sed -n 's/.*Bearer \([a-z0-9_]*\).*/\1/p' "$T/agent.txt" | head -1)
+API=http://127.0.0.1:7373/v1
+api() { curl -s -H "Authorization: Bearer $TOKEN" "$@"; }
+api "$API/help" | grep -q '"ssh_login_add"' && ok "API help" || ko "API help"
+R=$(api -d "{\"op\":\"exec\",\"node\":\"$NODE\",\"command\":\"echo api-exec-ok\"}" "$API/op")
+echo "$R" | grep -q "api-exec-ok" && ok "API exec" || ko "API exec ($R)"
+ssh-keygen -q -t ed25519 -N "" -C agent -f "$T/agentkey"
+R=$(api -d "{\"op\":\"ssh_login_add\",\"hosts\":[\"*\"],\"users\":[\"*\"],\"key\":\"$(cat "$T/agentkey.pub")\"}" "$API/op")
+echo "$R" | grep -q '"ok":true' && ok "API adds the agent's SSH key" || ko "API adds the agent's SSH key ($R)"
+R=$(ssh -i "$T/agentkey" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes "system+$NODE@127.0.0.1" echo ssh-gateway-ok 2>&1)
+echo "$R" | grep -q ssh-gateway-ok && ok "SSH gateway with the agent's key" || ko "SSH gateway with the agent's key ($R)"
+
 step "GUI (screenshot)"
 SHOT="$OUT/gui-$OS.png"
-export GANGLI_GUI_SCREENSHOT="$SHOT" GANGLI_GUI_SCREENSHOT_AFTER=6 GANGLI_LANG=it
+export GANGLI_GUI_SCREENSHOT="$SHOT" GANGLI_GUI_SCREENSHOT_AFTER=6
 case "$OS" in
   linux) (cd "$C" && tmo 60 xvfb-run -a -s "-screen 0 1280x800x24" "./$EXE" gui) ;;
   *) (cd "$C" && tmo 60 "./$EXE" gui) ;;

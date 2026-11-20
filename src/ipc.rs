@@ -65,8 +65,11 @@ impl IpcOp {
             IpcOp::TunnelAdd { .. } | IpcOp::TunnelRemove { .. } | IpcOp::TunnelSet { .. } => Some("admin"),
             // They show passwords.
             IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } | IpcOp::Update { .. } => Some("admin"),
-            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::DebugDrop { .. } => None,
-            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop | IpcOp::GuiShow => None,
+            // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
+            // the API itself and its tokens.
+            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::Stop => Some("admin"),
+            IpcOp::DebugDrop { .. } | IpcOp::GuiShow => None,
+            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } => None,
         }
     }
 }

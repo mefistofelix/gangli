@@ -97,7 +97,7 @@ struct Predict {
     base: Option<(i32, usize)>,
 }
 
-const BG: Color32 = Color32::from_rgb(24, 24, 27);
+pub(super) const BG: Color32 = Color32::from_rgb(24, 24, 27);
 const FG: Color32 = Color32::from_rgb(220, 220, 220);
 
 /// xterm's 256 colours (16 named, 6×6×6 cube, 24 greys) and the default foreground / background.
@@ -508,8 +508,8 @@ impl TermTab {
             }
         }
         let note = match &g.state {
-            State::Connecting => Some(super::tr::tr("connecting…", "collegamento…").to_string()),
-            State::Exited(code) => Some(super::tr::trf(format!("[ended, exit code {code}]"), format!("[terminato, codice di uscita {code}]"))),
+            State::Connecting => Some("connecting…".to_string()),
+            State::Exited(code) => Some(format!("[ended, exit code {code}]")),
             State::Failed(e) => Some(e.clone()),
             State::Running => None,
         };

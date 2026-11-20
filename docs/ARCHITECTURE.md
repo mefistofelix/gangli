@@ -207,6 +207,11 @@ keys = ["ssh-ed25519 AAAA… michele@laptop"]
 CLI: `gangli ssh login list|add|set|remove`, `gangli ssh password <machine> [user]` (prints the password
 that applies). GUI: a table of rules, a "copy password" button on each machine.
 
+**Keys instead of passwords**: a public key in the rule for `*` machines and `*` users lets every SSH client
+that holds the private key in, with no password: PuTTY and WinSCP launched from the GUI use Pageant's keys
+(PuTTY tries the agent's keys before the `-pw` password), OpenSSH uses its agent or `-i`; an AI agent adds its
+own key through the API (`ssh_login_add`).
+
 After the login the gateway opens a gangli stream to the node (there is **no SSH server on the nodes**):
 shell or command with a PTY (ConPTY on Windows, `openpty` via rustix on Linux / macOS) as the requested user,
 SFTP, and `direct-tcpip` / dynamic forwarding (`ssh -L`, `ssh -D`) into the machine's LAN.
@@ -333,8 +338,8 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 
 ## 12. GUI, tray, local API, LLM agents
 
-- **Native GUI** (egui) **[decided: native, not browser]** (`src/gui/`), one window, unified, Italian or
-  English (from the system, `GANGLI_LANG`, or the IT/EN button). `gangli gui`, or a double click (Windows:
+- **Native GUI** (egui) **[decided: native, not browser]** (`src/gui/`), one window, unified, in English
+  **[decided 2026-11-21]**. `gangli gui`, or a double click (Windows:
   the console window made for the double click is released; Linux / macOS: started without a terminal):
   - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, since / last seen),
     filter; a machine's panel: a **terminal inside the window** ("Terminal here"), or each launcher (PuTTY,
@@ -387,9 +392,15 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   3 s when there is no tray). Never a service.
 - **Local API** **[decided]**: off by default, enabled from the GUI or `gangli api enable` (on the console's local port,
   127.0.0.1:7373 by default, `[console] port`), served while a console is open. Named tokens made and revoked from the GUI or `gangli api token add|remove`,
-  never through the API itself; scopes `read` (status, machines, details) and `admin` (also networks, removing
-  machines), later `exec` / `connect`. Routes: `POST /v1/op` with an operation as JSON (`{"op":"nodes"}`),
-  `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`; `Authorization: Bearer <token>`.
+  never through the API itself; scopes `read` (status, machines, details) < `exec` (also commands, jobs,
+  terminals) < `admin`: **everything the CLI and the GUI do except the API and its tokens** **[decided
+  2026-11-21]**, so an AI agent with an admin token can list and identify the machines, run commands, add its
+  own key to the SSH gateway and connect with any client, make tunnels. Routes: `POST /v1/op` with an
+  operation as JSON (`{"op":"nodes"}`), `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`, `GET
+  /v1/help` (every operation with its parameters and scope, for agents); `Authorization: Bearer <token>`.
+  Making a token gives ready instructions for an agent (token, address, the main calls): the GUI copies them,
+  `gangli api token add NAME --scope admin --save FILE` writes them to an owner-only file. See
+  [API.md](API.md).
 - The CLI and GUI talk to the open console through the same local HTTP with the console's own token (in
   the owner-only `gangli.console`; the open console owns the port, which is also the single-instance guard), so an LLM using the CLI needs no token at all.
 - **CLI** mirrors the API: `nodes`, `info`, `exec`, `ssh`, `term`, `cp`, `forward`, `socks`, `job`, all with

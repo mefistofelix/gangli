@@ -218,9 +218,27 @@ fn print_api(v: &Value) {
     }
 }
 
-pub fn api(op: IpcOp, json: bool) -> Result<()> {
+pub fn api(op: IpcOp, json: bool, save: Option<std::path::PathBuf>) -> Result<()> {
     let adding = matches!(op, IpcOp::ApiTokenAdd { .. });
     let v = ipc::call(op)?;
+    if let (true, Some(path)) = (adding, &save) {
+        // The token with what an AI agent needs to use it, readable by this user only.
+        std::fs::write(path, v["instructions"].as_str().unwrap_or(""))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        if json {
+            print_json(&json!({ "name": v["name"], "scope": v["scope"], "saved": path, "enabled": v["enabled"] }));
+        } else {
+            println!("token {} (scope {}) with instructions for an AI agent written to {}", v["name"].as_str().unwrap_or(""), v["scope"].as_str().unwrap_or(""), path.display());
+            if v["enabled"].as_bool() != Some(true) {
+                eprintln!("the API is disabled: `gangli api enable`");
+            }
+        }
+        return Ok(());
+    }
     if json {
         print_json(&v);
     } else if adding {

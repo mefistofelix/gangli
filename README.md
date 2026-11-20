@@ -18,7 +18,10 @@ A network is a key: whoever has its private code owns it; its public code only l
   gateway (`ssh -p 2222 user+machine@127.0.0.1`), PuTTY / OpenSSH / WinSCP from a menu; shells as any user,
   persistent terminals that keep running when you leave; SFTP.
 - Tunnels to addresses on their network, saved and back by themselves; `ssh -D` for everything else.
-- `gangli exec` and background jobs for scripts and LLM agents (`--json`, stable exit codes); API tokens.
+- For scripts and AI agents: every command with `--json` and stable exit codes, and a local API whose admin
+  token can do everything the window does: list and identify the machines, run commands, connect over SSH
+  with any client, make tunnels ([docs/API.md](docs/API.md)).
+- SSH keys instead of passwords: with your Pageant key in the gateway, PuTTY and WinSCP log in by themselves.
 - Updates sent from the console to the machines.
 - Portable: everything it keeps is in `gangli.node` and `gangli.console` next to the binary.
 
@@ -42,4 +45,5 @@ gangli --help
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design and decisions.
 - [AGENTS.md](AGENTS.md): how the project is built and tested (for people and AI agents).
+- [docs/API.md](docs/API.md): the local API, for programs and AI agents.
 - [docs/RELAY.md](docs/RELAY.md): running your own relay.

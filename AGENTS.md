@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Guide for anyone (human or AI agent) working on gangli. Talk to the owner in Italian; code, comments, docs
-and commit messages in English.
+(AGENTS.md, README), the GUI and commit messages in English.
 
 ## What this is
 
@@ -74,9 +74,9 @@ src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec
 src/service/          system service per OS (SCM, launchd, systemd)
 src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the
                       open one), native.rs (eframe + tray-icon: Windows, macOS), x11.rs + raster.rs + sni.rs
-                      (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), autostart.rs (login item), icon.rs,
-                      tr.rs (it/en), png.rs
+                      (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), autostart.rs (login item), icon.rs, png.rs
 docs/ARCHITECTURE.md  design and decisions
+docs/API.md           the local API for programs and AI agents
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
 .github/workflows/build.yml  the builds, tests and releases (GitHub Actions of this public repository)
 scripts/ci.sh            runs that workflow from here, waits, downloads the results into out/ci/<os>/

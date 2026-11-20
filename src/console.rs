@@ -941,6 +941,10 @@ async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
         let _ = crate::http::write_response(&mut w, 401, &json!({ "ok": false, "error": "missing or unknown token" })).await;
         return;
     };
+    if req.method == "GET" && matches!(req.path.trim_end_matches('/'), "/v1" | "/v1/help") {
+        let _ = crate::http::write_response(&mut w, 200, &json!({ "ok": true, "data": api_help(&c) })).await;
+        return;
+    }
     let op: Result<IpcOp, u16> = match (req.method.as_str(), req.path.trim_end_matches('/')) {
         ("POST", "/v1/op") => serde_json::from_slice(&req.body).map_err(|_| 400),
         ("GET", "/v1/status") => Ok(IpcOp::Status),
@@ -972,6 +976,87 @@ async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
         Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
     };
     let _ = crate::http::write_response(&mut w, 200, &body).await;
+}
+
+/// Instructions for an AI agent (or any program) to manage the machines through the API with `token`: what the
+/// GUI copies and `gangli api token add --save` writes.
+pub fn agent_instructions(url: &str, token: &str, ssh_listen: &str) -> String {
+    format!(
+        "You can manage my machines with gangli, through its local HTTP API (it runs while gangli is open on this\n\
+         computer).\n\
+         \n\
+         - Base URL: {url}   Every request: header `Authorization: Bearer {token}`\n\
+         - Everything the API can do, with parameters: GET {url}/help\n\
+         - Machines (names, systems, LAN addresses, online, link): POST {url}/op  {{\"op\":\"nodes\"}}\n\
+         - Run a command on one:  {{\"op\":\"exec\",\"node\":\"NAME\",\"command\":\"uname -a\",\"timeout\":60}}\n\
+           (optional \"user\": an account on it, \"system\" for root / SYSTEM; answer: stdout, stderr, exit)\n\
+         - SSH with any client: gateway {ssh_listen}, login user+machine (e.g. root+nas). Add your public key once:\n\
+           {{\"op\":\"ssh_login_add\",\"hosts\":[\"*\"],\"users\":[\"*\"],\"key\":\"ssh-ed25519 AAAA...\"}}\n\
+           then `ssh -p {port} root+NAME@127.0.0.1`; or ask {{\"op\":\"ssh_password\",\"node\":\"NAME\"}} for a password.\n\
+         - Tunnel to an address on a machine's network:\n\
+           {{\"op\":\"tunnel_add\",\"name\":\"nas-web\",\"node\":\"NAME\",\"target\":\"192.168.1.10:80\",\"listen\":\"8080\"}}\n\
+         - A machine is NAME, or NAME.NETWORK when two networks have one with that name.\n\
+         - Answers are {{\"ok\":true,\"data\":...}} or {{\"ok\":false,\"error\":\"...\"}}.\n\
+         \n\
+         If the `gangli` command works here, `gangli <command> --json` does the same without a token\n\
+         (`gangli --help`; e.g. `gangli nodes --json`, `gangli exec NAME -- df -h`).\n",
+        port = ssh_listen.rsplit(':').next().unwrap_or("2222"),
+    )
+}
+
+/// `GET /v1/help`: the API described for programs and AI agents.
+fn api_help(c: &Console) -> Value {
+    let (port, listen) = {
+        let st = c.state.lock().unwrap();
+        (st.console.port, st.ssh.listen.clone())
+    };
+    let op = |op: &str, scope: &str, params: Value, does: &str| json!({ "op": op, "scope": scope, "params": params, "does": does });
+    json!({
+        "gangli": crate::build_version(),
+        "base": format!("http://127.0.0.1:{port}/v1"),
+        "auth": "header Authorization: Bearer <token>; scopes read < exec < admin (admin: everything but the API tokens)",
+        "routes": {
+            "POST /v1/op": "body {\"op\": \"<name>\", ...params}",
+            "GET /v1/status": "op status",
+            "GET /v1/nodes": "op nodes",
+            "GET /v1/nodes/<name>": "op info",
+            "GET /v1/help": "this",
+        },
+        "machines": "a machine is its name, or name.network when two networks have one with that name",
+        "ssh_gateway": {
+            "address": listen,
+            "login": "user+machine (e.g. root+nas); `system` is root / SYSTEM, `desktop` the user at the screen",
+            "auth": "a key added with ssh_login_add, or the password from ssh_password",
+        },
+        "ops": [
+            op("status", "read", json!({}), "console version, id, networks with machine counts"),
+            op("nodes", "read", json!({ "network": "optional" }), "machines: name, network, online, since, link (direct / relay, rtt), inventory (system, addresses, users, cpu, memory, disks)"),
+            op("info", "read", json!({ "node": "name" }), "fresh details of one machine (online)"),
+            op("tunnel_list", "read", json!({}), "saved tunnels and whether they are active"),
+            op("exec", "exec", json!({ "node": "name", "command": "text", "user": "optional", "timeout": "optional seconds" }), "run a command: stdout, stderr, exit"),
+            op("job_start", "exec", json!({ "node": "name", "command": "text", "user": "optional" }), "run a command in the background on the machine"),
+            op("job_list", "exec", json!({ "node": "name" }), "its background jobs"),
+            op("job_output", "exec", json!({ "node": "name", "job": "id", "from": "optional byte offset" }), "output of a job so far"),
+            op("job_kill", "exec", json!({ "node": "name", "job": "id" }), "stop a job"),
+            op("term_list", "exec", json!({ "node": "name" }), "persistent terminals (attach with ssh user+machine+name)"),
+            op("term_kill", "exec", json!({ "node": "name", "name": "terminal" }), "end a persistent terminal"),
+            op("ssh_status", "admin", json!({}), "SSH gateway address, login rules (with passwords), launchers"),
+            op("ssh_password", "admin", json!({ "node": "name", "user": "optional" }), "gateway login and password for a machine"),
+            op("ssh_login_add", "admin", json!({ "hosts": ["*"], "users": ["*"], "password": "optional", "key": "optional OpenSSH public key" }), "allow a key or a password on the gateway (the same hosts and users as an existing rule: added to it)"),
+            op("ssh_login_remove", "admin", json!({ "index": "rule number from ssh_status" }), "remove a login rule"),
+            op("launch", "admin", json!({ "node": "name", "launcher": "optional (PuTTY, OpenSSH, WinSCP...)", "user": "optional", "term": "optional persistent terminal" }), "the filled command line of a launcher (argv), to start it yourself"),
+            op("tunnel_add", "admin", json!({ "name": "text", "node": "name", "target": "host:port on its network", "listen": "optional local port or address" }), "save and start a tunnel"),
+            op("tunnel_remove", "admin", json!({ "name": "text" }), "remove a tunnel"),
+            op("tunnel_set", "admin", json!({ "name": "text", "enabled": true }), "turn a tunnel on or off"),
+            op("network_create", "admin", json!({ "name": "text" }), "a new network: its public and private codes"),
+            op("network_add", "admin", json!({ "code": "private code", "name": "optional" }), "add a network owned elsewhere"),
+            op("network_codes", "admin", json!({ "name": "network" }), "a network's codes"),
+            op("network_remove", "admin", json!({ "name": "network" }), "remove a network from this console"),
+            op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
+            op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "folder with the release binaries" }), "send machines a new gangli"),
+            op("stop", "admin", json!({}), "close this console"),
+        ],
+    })
 }
 
 fn api_json(api: &ApiConfig, port: u16) -> Value {
@@ -1188,14 +1273,16 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 bail!("scope must be read, exec or admin");
             }
             let token = format!("gat_{}", HEXLOWER.encode(&random16()));
-            let (enabled, port) = {
+            let (enabled, port, listen) = {
                 let mut st = c.state.lock().unwrap();
                 st.api.tokens.retain(|t| t.name != name);
                 st.api.tokens.push(ApiToken { name: name.clone(), scope: scope.clone(), token: token.clone(), created: now() });
-                (st.api.enabled, st.console.port)
+                (st.api.enabled, st.console.port, st.ssh.listen.clone())
             };
             c.save();
-            Ok(json!({ "name": name, "scope": scope, "token": token, "url": format!("http://127.0.0.1:{port}/v1"), "enabled": enabled }))
+            let url = format!("http://127.0.0.1:{port}/v1");
+            let instructions = agent_instructions(&url, &token, &listen);
+            Ok(json!({ "name": name, "scope": scope, "token": token, "url": url, "enabled": enabled, "instructions": instructions }))
         }
         IpcOp::ApiTokenRemove { name } => {
             let removed = {

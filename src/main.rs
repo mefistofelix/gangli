@@ -305,9 +305,13 @@ enum TokenCmd {
     /// Make a token (printed once).
     Add {
         name: String,
-        /// read: status, machines, details. admin: also networks and removing machines.
+        /// read: machines and their details. exec: also commands, jobs, terminals. admin: everything the CLI and
+        /// the GUI do but the API tokens (for an AI agent that manages the machines).
         #[arg(long, default_value = "read")]
         scope: String,
+        /// Write the token with instructions for an AI agent into this file (readable by you only).
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
     },
     /// Revoke a token.
     Remove { name: String },
@@ -413,16 +417,20 @@ fn main() {
         Some(Command::Console(ConsoleCmd::Run)) => console::run_foreground(),
         Some(Command::Console(ConsoleCmd::Stop)) => console_cmd::stop(json),
         Some(Command::Console(ConsoleCmd::Status)) => console_cmd::status(json),
-        Some(Command::Api(a)) => console_cmd::api(
-            match a {
+        Some(Command::Api(a)) => {
+            let save = match &a {
+                ApiCmd::Token(TokenCmd::Add { save, .. }) => save.clone(),
+                _ => None,
+            };
+            let op = match a {
                 ApiCmd::Status | ApiCmd::Token(TokenCmd::List) => ipc::IpcOp::ApiStatus,
                 ApiCmd::Enable => ipc::IpcOp::ApiEnable,
                 ApiCmd::Disable => ipc::IpcOp::ApiDisable,
-                ApiCmd::Token(TokenCmd::Add { name, scope }) => ipc::IpcOp::ApiTokenAdd { name, scope },
+                ApiCmd::Token(TokenCmd::Add { name, scope, .. }) => ipc::IpcOp::ApiTokenAdd { name, scope },
                 ApiCmd::Token(TokenCmd::Remove { name }) => ipc::IpcOp::ApiTokenRemove { name },
-            },
-            json,
-        ),
+            };
+            console_cmd::api(op, json, save)
+        }
         Some(Command::Tunnel(t)) => console_cmd::tunnel(
             match t {
                 TunnelCmd::Add { name, node, target, listen } => ipc::IpcOp::TunnelAdd { name, node, target, listen },

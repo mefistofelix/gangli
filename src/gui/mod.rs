@@ -15,7 +15,6 @@ mod autostart;
 mod client;
 mod icon;
 mod png;
-mod tr;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod native;
@@ -85,7 +84,6 @@ pub fn run(hidden: bool) -> Result<()> {
     }
     #[cfg(windows)]
     hide_own_console();
-    tr::init();
     let client = client::Client::start()?;
     #[cfg(any(windows, target_os = "macos"))]
     return native::run(client, hidden);

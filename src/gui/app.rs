@@ -11,7 +11,6 @@ use egui::{Align, Color32, Layout, RichText, Ui};
 use serde_json::Value;
 
 use super::client::{Client, Tag};
-use super::tr::{italian, set_italian, tr, trf};
 use super::{TrayAction, TrayModel};
 use crate::ipc::{IpcOp, NodeView};
 use crate::util::{human_ago, human_bytes, now};
@@ -39,7 +38,7 @@ enum Page {
 
 enum Modal {
     Codes { network: String, public: String, private: String, show_private: bool },
-    Token { name: String, token: String, url: String },
+    Token { name: String, token: String, url: String, instructions: String },
     Confirm { text: String, op: IpcOp, done: String },
 }
 
@@ -265,15 +264,12 @@ impl App {
     pub fn tray_model(&self) -> TrayModel {
         let online: Vec<String> = self.nodes.iter().filter(|n| n.online).map(|n| n.name.clone()).collect();
         TrayModel {
-            tooltip: trf(
-                format!("gangli: {} of {} machines online", online.len(), self.nodes.len()),
-                format!("gangli: macchine online {} su {}", online.len(), self.nodes.len()),
-            ),
+            tooltip: format!("gangli: {} of {} machines online", online.len(), self.nodes.len()),
             online,
-            open_label: tr("Open a terminal", "Apri un terminale").into(),
-            show_label: tr("Open gangli", "Apri gangli").into(),
-            quit_label: tr("Quit", "Esci").into(),
-            machines_label: tr("Machines", "Macchine").into(),
+            open_label: "Open a terminal".into(),
+            show_label: "Open gangli".into(),
+            quit_label: "Quit".into(),
+            machines_label: "Machines".into(),
         }
     }
 
@@ -382,32 +378,29 @@ impl App {
                 self.call(Tag::Status, IpcOp::Status);
             }
             Tag::Token => {
-                self.modal = Some(Modal::Token { name: s(&v["name"]).into(), token: s(&v["token"]).into(), url: s(&v["url"]).into() });
+                self.modal = Some(Modal::Token { name: s(&v["name"]).into(), token: s(&v["token"]).into(), url: s(&v["url"]).into(), instructions: s(&v["instructions"]).into() });
                 self.call(Tag::Api, IpcOp::ApiStatus);
             }
             Tag::Launch => {
                 let argv: Vec<String> = serde_json::from_value(v["argv"].clone()).unwrap_or_default();
                 match spawn_argv(&argv) {
                     Ok(()) => {
-                        let msg = trf(format!("{} started", s(&v["launcher"])), format!("{} avviato", s(&v["launcher"])));
+                        let msg = format!("{} started", s(&v["launcher"]));
                         self.toast(msg, false)
                     }
                     Err(e) => self.toast(
-                        trf(
-                            format!("cannot start {e} (fix its path in the [[launcher]] list of gangli.console)"),
-                            format!("non riesco ad avviare {e} (correggi il percorso nei [[launcher]] di gangli.console)"),
-                        ),
+                        format!("cannot start {e} (fix its path in the [[launcher]] list of gangli.console)"),
                         true,
                     ),
                 }
             }
             Tag::CopyPassword => {
                 self.copy = Some(s(&v["password"]).to_string());
-                self.toast(tr("Password copied", "Password copiata"), false);
+                self.toast("Password copied", false);
             }
             Tag::CopySsh => {
                 self.copy = Some(format!("ssh -p {} {}@127.0.0.1", v["port"].as_u64().unwrap_or(2222), s(&v["login"])));
-                self.toast(tr("ssh command copied", "Comando ssh copiato"), false);
+                self.toast("ssh command copied", false);
             }
             Tag::Done(msg) => {
                 if let Some(list) = v.as_array() {
@@ -415,7 +408,7 @@ impl App {
                     for r in list {
                         let name = s(&r["node"]).to_string();
                         if r["ok"].as_bool() == Some(true) {
-                            self.toast(format!("{name}: {}", tr("updating", "aggiornamento in corso")), false);
+                            self.toast(format!("{name}: {}", "updating"), false);
                         } else {
                             self.toast(format!("{name}: {}", s(&r["error"])), true);
                         }
@@ -467,7 +460,7 @@ impl App {
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         if let Some(e) = self.client.broken().map(str::to_string) {
             egui::CentralPanel::default_margins().show(ui, |ui| {
-                ui.heading(tr("The console could not start", "La console non è partita"));
+                ui.heading("The console could not start");
                 ui.label(RichText::new(e).color(RED));
             });
             return;
@@ -506,12 +499,12 @@ impl App {
             ui.label(RichText::new("gangli").strong().size(19.0).color(ACCENT));
             ui.add_space(10.0);
             let pages = [
-                (Page::Machines, tr("Machines", "Macchine")),
-                (Page::Networks, tr("Networks", "Reti")),
-                (Page::Tunnels, tr("Tunnels", "Tunnel")),
+                (Page::Machines, "Machines"),
+                (Page::Networks, "Networks"),
+                (Page::Tunnels, "Tunnels"),
                 (Page::Ssh, "SSH"),
                 (Page::Api, "API"),
-                (Page::Computer, tr("This computer", "Questo computer")),
+                (Page::Computer, "This computer"),
             ];
             for (p, label) in pages {
                 if ui.selectable_label(self.page == p, label).clicked() {
@@ -520,24 +513,20 @@ impl App {
                 }
             }
             if !self.tabs.is_empty() {
-                let label = trf(format!("Terminals ({})", self.tabs.len()), format!("Terminali ({})", self.tabs.len()));
+                let label = format!("Terminals ({})", self.tabs.len());
                 if ui.selectable_label(self.page == Page::Terminals, label).clicked() {
                     self.page = Page::Terminals;
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(tr("Quit", "Esci")).on_hover_text(tr("Close gangli and its console", "Chiude gangli e la sua console")).clicked() {
+                if ui.button("Quit").on_hover_text("Close gangli and its console").clicked() {
                     self.quit = true;
                 }
-                let lang = if italian() { "EN" } else { "IT" };
-                if ui.small_button(lang).on_hover_text(tr("Italiano", "English")).clicked() {
-                    set_italian(!italian());
-                }
                 let online = self.nodes.iter().filter(|n| n.online).count();
-                let txt = trf(format!("{online} of {} online", self.nodes.len()), format!("{online} online su {}", self.nodes.len()));
+                let txt = format!("{online} of {} online", self.nodes.len());
                 ui.label(RichText::new(txt).weak());
                 if !self.client.owns_console() && self.client.broken().is_none() {
-                    ui.label(RichText::new(tr("(console of `gangli console run`)", "(console di `gangli console run`)")).weak());
+                    ui.label(RichText::new("(console of `gangli console run`)").weak());
                 }
             });
         });
@@ -548,27 +537,21 @@ impl App {
 
     fn machines(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.heading(tr("Machines", "Macchine"));
+            ui.heading("Machines");
             ui.add_space(12.0);
-            ui.add(egui::TextEdit::singleline(&mut self.f.filter).hint_text(tr("filter", "filtra")).desired_width(180.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.filter).hint_text("filter").desired_width(180.0));
         });
         ui.add_space(4.0);
         let nets = self.status["networks"].as_array().map(|a| a.len()).unwrap_or(0);
         if self.nodes.is_empty() {
             ui.add_space(20.0);
             if nets == 0 {
-                ui.label(tr(
-                    "No network yet. Create one in Networks, or add the one you already have with its private code.",
-                    "Ancora nessuna rete. Creane una in Reti, o aggiungi quella che hai già con il suo codice privato.",
-                ));
-                if ui.button(tr("Go to Networks", "Vai a Reti")).clicked() {
+                ui.label("No network yet. Create one in Networks, or add the one you already have with its private code.");
+                if ui.button("Go to Networks").clicked() {
                     self.page = Page::Networks;
                 }
             } else {
-                ui.label(tr(
-                    "No machine yet. Run gangli on a machine with the network's public code (Networks → Codes), or send it a prepared gangli.",
-                    "Ancora nessuna macchina. Avvia gangli su una macchina con il codice pubblico della rete (Reti → Codici), o mandale un gangli preparato.",
-                ));
+                ui.label("No machine yet. Run gangli on a machine with the network's public code (Networks → Codes), or send it a prepared gangli.");
             }
             return;
         }
@@ -579,13 +562,13 @@ impl App {
         nodes.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
         egui::Grid::new("machines").striped(true).num_columns(if many_nets { 7 } else { 6 }).spacing([14.0, 8.0]).show(ui, |ui| {
             ui.label("");
-            ui.label(RichText::new(tr("Name", "Nome")).strong());
-            ui.label(RichText::new(tr("System", "Sistema")).strong());
-            ui.label(RichText::new(tr("LAN address", "Indirizzo LAN")).strong());
-            ui.label(RichText::new(tr("Link", "Collegamento")).strong());
-            ui.label(RichText::new(tr("Since", "Da")).strong());
+            ui.label(RichText::new("Name").strong());
+            ui.label(RichText::new("System").strong());
+            ui.label(RichText::new("LAN address").strong());
+            ui.label(RichText::new("Link").strong());
+            ui.label(RichText::new("Since").strong());
             if many_nets {
-                ui.label(RichText::new(tr("Network", "Rete")).strong());
+                ui.label(RichText::new("Network").strong());
             }
             ui.end_row();
             for n in &nodes {
@@ -606,7 +589,7 @@ impl App {
                 let when = if n.online {
                     n.since.map(|s| human_ago(t.saturating_sub(s))).unwrap_or_default()
                 } else if n.last_seen > 0 {
-                    trf(format!("offline, seen {} ago", human_ago(t.saturating_sub(n.last_seen))), format!("offline, visto {} fa", human_ago(t.saturating_sub(n.last_seen))))
+                    format!("offline, seen {} ago", human_ago(t.saturating_sub(n.last_seen)))
                 } else {
                     "offline".into()
                 };
@@ -640,12 +623,12 @@ impl App {
         ui.add_space(6.0);
 
         // Open a terminal / files.
-        ui.label(RichText::new(tr("Open", "Apri")).strong());
+        ui.label(RichText::new("Open").strong());
         ui.horizontal(|ui| {
-            ui.label(tr("as", "come"));
-            ui.add(egui::TextEdit::singleline(&mut self.f.user).hint_text(tr("default", "predefinito")).desired_width(110.0));
+            ui.label("as");
+            ui.add(egui::TextEdit::singleline(&mut self.f.user).hint_text("default").desired_width(110.0));
             if !inv.users.is_empty() {
-                egui::ComboBox::from_id_salt("users").selected_text(tr("choose", "scegli")).width(80.0).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("users").selected_text("choose").width(80.0).show_ui(ui, |ui| {
                     for u in ["system", "desktop"].iter().map(|s| s.to_string()).chain(inv.users.iter().cloned()) {
                         if ui.selectable_label(self.f.user == u, &u).clicked() {
                             self.f.user = u.clone();
@@ -655,8 +638,8 @@ impl App {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(tr("persistent terminal", "terminale persistente"));
-            ui.add(egui::TextEdit::singleline(&mut self.f.term).hint_text(tr("none", "nessuno")).desired_width(110.0));
+            ui.label("persistent terminal");
+            ui.add(egui::TextEdit::singleline(&mut self.f.term).hint_text("none").desired_width(110.0));
         });
         let user = (!self.f.user.trim().is_empty()).then(|| self.f.user.trim().to_string());
         let term = (!self.f.term.trim().is_empty()).then(|| self.f.term.trim().to_string());
@@ -664,8 +647,8 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             if self.client.console().is_some()
                 && ui
-                    .add_enabled(n.online, egui::Button::new(RichText::new(tr("Terminal here", "Terminale qui")).strong()))
-                    .on_hover_text(tr("A terminal inside this window", "Un terminale dentro questa finestra"))
+                    .add_enabled(n.online, egui::Button::new(RichText::new("Terminal here").strong()))
+                    .on_hover_text("A terminal inside this window")
                     .clicked()
             {
                 self.open_term(&tgt, &n.name, user.clone(), term.clone());
@@ -677,15 +660,15 @@ impl App {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button(tr("Copy password", "Copia password")).clicked() {
+            if ui.button("Copy password").clicked() {
                 self.call(Tag::CopyPassword, IpcOp::SshPassword { node: tgt.clone(), user: user.clone() });
             }
-            if ui.button(tr("Copy ssh command", "Copia comando ssh")).clicked() {
+            if ui.button("Copy ssh command").clicked() {
                 self.call(Tag::CopySsh, IpcOp::SshPassword { node: tgt.clone(), user: user.clone() });
             }
         });
         if !n.online {
-            ui.label(RichText::new(tr("Offline: it comes back by itself when the machine is on.", "Offline: torna da sola quando la macchina è accesa.")).weak());
+            ui.label(RichText::new("Offline: it comes back by itself when the machine is on.").weak());
         }
 
         // Persistent terminals.
@@ -697,21 +680,21 @@ impl App {
             let terms = self.terms.get(&n.id).cloned().unwrap_or_default();
             if !terms.is_empty() {
                 ui.add_space(6.0);
-                ui.label(RichText::new(tr("Persistent terminals", "Terminali persistenti")).strong());
+                ui.label(RichText::new("Persistent terminals").strong());
                 for t in terms {
                     let name = s(&t["name"]).to_string();
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&name).monospace());
                         ui.label(RichText::new(format!("{} · {}", s(&t["user"]), human_ago(now().saturating_sub(t["started"].as_u64().unwrap_or(0))))).weak());
                         let u = Some(s(&t["user"]).to_string()).filter(|u| !u.is_empty());
-                        if self.client.console().is_some() && ui.small_button(tr("here", "qui")).clicked() {
+                        if self.client.console().is_some() && ui.small_button("here").clicked() {
                             self.open_term(&tgt, &n.name, u.clone(), Some(name.clone()));
                         }
-                        if ui.small_button(tr("open", "apri")).clicked() {
+                        if ui.small_button("open").clicked() {
                             self.call(Tag::Launch, IpcOp::Launch { node: tgt.clone(), launcher: None, user: u.clone(), term: Some(name.clone()) });
                         }
-                        if ui.small_button(tr("close", "chiudi")).clicked() {
-                            self.call(Tag::Done(trf(format!("terminal {name} closed"), format!("terminale {name} chiuso"))), IpcOp::TermKill { node: tgt.clone(), name: name.clone() });
+                        if ui.small_button("close").clicked() {
+                            self.call(Tag::Done(format!("terminal {name} closed")), IpcOp::TermKill { node: tgt.clone(), name: name.clone() });
                             self.terms_polled = None;
                         }
                     });
@@ -721,7 +704,7 @@ impl App {
 
         // Tunnels of this machine.
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("Tunnels", "Tunnel")).strong());
+        ui.label(RichText::new("Tunnels").strong());
         let mine: Vec<Value> = self.tunnels.iter().filter(|t| s(&t["node"]) == tgt || s(&t["node"]) == n.name).cloned().collect();
         for t in &mine {
             ui.horizontal(|ui| {
@@ -730,57 +713,54 @@ impl App {
             });
         }
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text(tr("their address, e.g. 192.168.1.20:80", "indirizzo da loro, es. 192.168.1.20:80")).desired_width(200.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text(tr("local port", "porta locale")).desired_width(80.0));
-            if ui.button(tr("Add", "Aggiungi")).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text("their address, e.g. 192.168.1.20:80").desired_width(200.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text("local port").desired_width(80.0));
+            if ui.button("Add").clicked() {
                 self.add_tunnel(tgt.clone(), n.name.clone());
             }
         });
 
         // What the machine is.
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("Machine", "Macchina")).strong());
+        ui.label(RichText::new("Machine").strong());
         egui::Grid::new("inv").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
             let mut row = |k: &str, v: String| {
                 ui.label(RichText::new(k).weak());
                 ui.add(egui::Label::new(v).wrap());
                 ui.end_row();
             };
-            row(tr("System", "Sistema"), format!("{} ({}, {})", inv.os_label(), inv.kernel, inv.arch));
+            row("System", format!("{} ({}, {})", inv.os_label(), inv.kernel, inv.arch));
             row("CPU", format!("{} × {}", inv.cpus, inv.cpu));
-            row("RAM", trf(format!("{} free of {}", human_bytes(inv.mem_avail), human_bytes(inv.mem_total)), format!("{} liberi su {}", human_bytes(inv.mem_avail), human_bytes(inv.mem_total))));
+            row("RAM", format!("{} free of {}", human_bytes(inv.mem_avail), human_bytes(inv.mem_total)));
             for d in &inv.disks {
-                row(tr("Disk", "Disco"), format!("{}  {} / {}", d.mount, human_bytes(d.avail), human_bytes(d.total)));
+                row("Disk", format!("{}  {} / {}", d.mount, human_bytes(d.avail), human_bytes(d.total)));
             }
-            row(tr("LAN addresses", "Indirizzi LAN"), inv.ips.join(", "));
-            row(tr("Users", "Utenti"), inv.users.join(", "));
-            let access = if inv.full_access { tr("full", "completo") } else { tr("this user only", "solo questo utente") };
-            row(tr("Runs as", "Gira come"), format!("{} ({access})", inv.service_user));
-            row(tr("Up for", "Acceso da"), human_ago(inv.uptime));
+            row("LAN addresses", inv.ips.join(", "));
+            row("Users", inv.users.join(", "));
+            let access = if inv.full_access { "full" } else { "this user only" };
+            row("Runs as", format!("{} ({access})", inv.service_user));
+            row("Up for", human_ago(inv.uptime));
             row("gangli", inv.version.clone());
             if let Some(p) = &n.path {
-                row(tr("Peer address", "Indirizzo"), p.remote.clone());
+                row("Peer address", p.remote.clone());
             }
         });
 
         // Update, forget.
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("Update", "Aggiorna")).strong());
+        ui.label(RichText::new("Update").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.update_from).hint_text(tr("folder with a signed release", "cartella con una release firmata")).desired_width(220.0));
-            if ui.add_enabled(n.online && !self.f.update_from.trim().is_empty(), egui::Button::new(tr("Update", "Aggiorna"))).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.update_from).hint_text("folder with a signed release").desired_width(220.0));
+            if ui.add_enabled(n.online && !self.f.update_from.trim().is_empty(), egui::Button::new("Update")).clicked() {
                 self.call(Tag::Done(String::new()), IpcOp::Update { nodes: vec![tgt.clone()], from: self.f.update_from.trim().to_string() });
             }
         });
         ui.add_space(8.0);
-        if ui.button(RichText::new(tr("Forget this machine", "Dimentica questa macchina")).color(RED)).clicked() {
+        if ui.button(RichText::new("Forget this machine").color(RED)).clicked() {
             self.modal = Some(Modal::Confirm {
-                text: trf(
-                    format!("Forget {}? It is removed from the network; to come back it must be admitted again.", n.name),
-                    format!("Dimenticare {}? Viene tolta dalla rete; per tornare dovrà essere ammessa di nuovo.", n.name),
-                ),
+                text: format!("Forget {}? It is removed from the network; to come back it must be admitted again.", n.name),
                 op: IpcOp::Forget { node: tgt.clone() },
-                done: trf(format!("{} forgotten", n.name), format!("{} dimenticata", n.name)),
+                done: format!("{} forgotten", n.name),
             });
         }
     }
@@ -788,7 +768,7 @@ impl App {
     fn add_tunnel(&mut self, node: String, node_name: String) {
         let target = self.f.tun_target.trim().to_string();
         if !target.contains(':') {
-            self.toast(tr("Write the address as host:port", "Scrivi l'indirizzo come host:porta"), true);
+            self.toast("Write the address as host:port", true);
             return;
         }
         let listen = self.f.tun_listen.trim().to_string();
@@ -798,7 +778,7 @@ impl App {
             name = crate::util::slug(&format!("{node_name}-{port}"));
         }
         self.call(
-            Tag::Done(trf(format!("tunnel {name} added"), format!("tunnel {name} aggiunto"))),
+            Tag::Done(format!("tunnel {name} added")),
             IpcOp::TunnelAdd { name, node, target, listen: (!listen.is_empty()).then_some(listen) },
         );
         self.f.tun_target.clear();
@@ -809,11 +789,8 @@ impl App {
     // ----- Networks -----
 
     fn networks(&mut self, ui: &mut Ui) {
-        ui.heading(tr("Networks", "Reti"));
-        ui.label(RichText::new(tr(
-            "A network is a key. Its public code makes a machine a node; its private code makes a console an owner: keep it for yourself.",
-            "Una rete è una chiave. Il codice pubblico rende nodo una macchina; il codice privato rende proprietaria una console: tienilo per te.",
-        )).weak());
+        ui.heading("Networks");
+        ui.label(RichText::new("A network is a key. Its public code makes a machine a node; its private code makes a console an owner: keep it for yourself.").weak());
         ui.add_space(8.0);
         let nets = self.status["networks"].as_array().cloned().unwrap_or_default();
         for n in &nets {
@@ -822,22 +799,16 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&name).strong().size(16.0));
-                    ui.label(RichText::new(trf(
-                        format!("{} of {} machines online · {} consoles", n["online"], n["nodes"], n["consoles"]),
-                        format!("macchine online: {} su {} · console: {}", n["online"], n["nodes"], n["consoles"]),
-                    )).weak());
+                    ui.label(RichText::new(format!("{} of {} machines online · {} consoles", n["online"], n["nodes"], n["consoles"])).weak());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button(RichText::new(tr("Remove", "Rimuovi")).color(RED)).clicked() {
+                        if ui.button(RichText::new("Remove").color(RED)).clicked() {
                             self.modal = Some(Modal::Confirm {
-                                text: trf(
-                                    format!("Remove {name} from this console? Without its private code you cannot add it back."),
-                                    format!("Togliere {name} da questa console? Senza il suo codice privato non potrai riaggiungerla."),
-                                ),
+                                text: format!("Remove {name} from this console? Without its private code you cannot add it back."),
                                 op: IpcOp::NetworkRemove { name: name.clone() },
-                                done: trf(format!("{name} removed"), format!("{name} rimossa")),
+                                done: format!("{name} removed"),
                             });
                         }
-                        if ui.button(tr("Codes", "Codici")).clicked() {
+                        if ui.button("Codes").clicked() {
                             self.call(Tag::Codes, IpcOp::NetworkCodes { name: name.clone() });
                         }
                     });
@@ -846,20 +817,20 @@ impl App {
             ui.add_space(4.0);
         }
         ui.add_space(10.0);
-        ui.label(RichText::new(tr("New network", "Nuova rete")).strong());
+        ui.label(RichText::new("New network").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.net_name).hint_text(tr("name, e.g. family", "nome, es. famiglia")).desired_width(200.0));
-            if ui.add_enabled(!self.f.net_name.trim().is_empty(), egui::Button::new(tr("Create", "Crea"))).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.net_name).hint_text("name, e.g. family").desired_width(200.0));
+            if ui.add_enabled(!self.f.net_name.trim().is_empty(), egui::Button::new("Create")).clicked() {
                 self.call(Tag::Codes, IpcOp::NetworkCreate { name: self.f.net_name.trim().to_string() });
                 self.f.net_name.clear();
             }
         });
         ui.add_space(6.0);
-        ui.label(RichText::new(tr("A network you already own (from another console)", "Una rete che hai già (da un'altra console)")).strong());
+        ui.label(RichText::new("A network you already own (from another console)").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.add_code).password(true).hint_text(tr("private code gangli-key-…", "codice privato gangli-key-…")).desired_width(300.0));
-            if ui.add_enabled(!self.f.add_code.trim().is_empty(), egui::Button::new(tr("Add", "Aggiungi"))).clicked() {
-                self.call(Tag::Done(tr("Network added", "Rete aggiunta").into()), IpcOp::NetworkAdd { code: self.f.add_code.trim().to_string(), name: None });
+            ui.add(egui::TextEdit::singleline(&mut self.f.add_code).password(true).hint_text("private code gangli-key-…").desired_width(300.0));
+            if ui.add_enabled(!self.f.add_code.trim().is_empty(), egui::Button::new("Add")).clicked() {
+                self.call(Tag::Done("Network added".into()), IpcOp::NetworkAdd { code: self.f.add_code.trim().to_string(), name: None });
                 self.f.add_code.clear();
             }
         });
@@ -868,16 +839,13 @@ impl App {
     // ----- Tunnels -----
 
     fn tunnels_page(&mut self, ui: &mut Ui) {
-        ui.heading(tr("Tunnels", "Tunnel"));
-        ui.label(RichText::new(tr(
-            "A local port that reaches an address on a machine's network; saved, and back by itself while gangli is open.",
-            "Una porta locale che raggiunge un indirizzo nella rete di una macchina; salvato, e riattivato da solo mentre gangli è aperto.",
-        )).weak());
+        ui.heading("Tunnels");
+        ui.label(RichText::new("A local port that reaches an address on a machine's network; saved, and back by itself while gangli is open.").weak());
         ui.add_space(8.0);
         let tunnels = self.tunnels.clone();
         if !tunnels.is_empty() {
             egui::Grid::new("tunnels").striped(true).num_columns(6).spacing([14.0, 8.0]).show(ui, |ui| {
-                for h in [tr("On", "Attivo"), tr("Name", "Nome"), tr("Machine", "Macchina"), tr("Local", "Locale"), tr("Their address", "Indirizzo da loro"), ""] {
+                for h in ["On", "Name", "Machine", "Local", "Their address", ""] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -894,27 +862,27 @@ impl App {
                     ui.label(s(&t["node"]));
                     ui.label(RichText::new(s(&t["listen"])).monospace());
                     ui.label(RichText::new(s(&t["target"])).monospace());
-                    if ui.small_button(tr("remove", "rimuovi")).clicked() {
-                        self.call(Tag::Done(trf(format!("tunnel {name} removed"), format!("tunnel {name} rimosso"))), IpcOp::TunnelRemove { name: name.clone() });
+                    if ui.small_button("remove").clicked() {
+                        self.call(Tag::Done(format!("tunnel {name} removed")), IpcOp::TunnelRemove { name: name.clone() });
                     }
                     ui.end_row();
                 }
             });
         }
         ui.add_space(10.0);
-        ui.label(RichText::new(tr("New tunnel", "Nuovo tunnel")).strong());
+        ui.label(RichText::new("New tunnel").strong());
         ui.horizontal_wrapped(|ui| {
             let names: Vec<(String, String)> = self.nodes.iter().map(|n| (target(n), n.name.clone())).collect();
-            let shown = names.iter().find(|(t, _)| *t == self.f.tun_node).map(|(_, n)| n.clone()).unwrap_or_else(|| tr("machine", "macchina").into());
+            let shown = names.iter().find(|(t, _)| *t == self.f.tun_node).map(|(_, n)| n.clone()).unwrap_or_else(|| "machine".into());
             egui::ComboBox::from_id_salt("tun_node").selected_text(shown).show_ui(ui, |ui| {
                 for (t, n) in &names {
                     ui.selectable_value(&mut self.f.tun_node, t.clone(), n);
                 }
             });
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text(tr("their address host:port", "indirizzo da loro host:porta")).desired_width(200.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text(tr("local port", "porta locale")).desired_width(90.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_name).hint_text(tr("name (optional)", "nome (facoltativo)")).desired_width(130.0));
-            if ui.add_enabled(!self.f.tun_node.is_empty(), egui::Button::new(tr("Add", "Aggiungi"))).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text("their address host:port").desired_width(200.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text("local port").desired_width(90.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.tun_name).hint_text("name (optional)").desired_width(130.0));
+            if ui.add_enabled(!self.f.tun_node.is_empty(), egui::Button::new("Add")).clicked() {
                 let node = self.f.tun_node.clone();
                 let name = names.iter().find(|(t, _)| *t == node).map(|(_, n)| n.clone()).unwrap_or_default();
                 self.add_tunnel(node, name);
@@ -925,21 +893,18 @@ impl App {
     // ----- SSH -----
 
     fn ssh_page(&mut self, ui: &mut Ui) {
-        ui.heading(tr("SSH gateway", "Gateway SSH"));
+        ui.heading("SSH gateway");
         let listen = s(&self.ssh["listen"]).to_string();
-        ui.label(trf(
-            format!("Any SSH client reaches the machines at {listen} with the login user+machine (e.g. root+nas)."),
-            format!("Qualsiasi client SSH raggiunge le macchine su {listen} con il login utente+macchina (es. root+nas)."),
-        ));
+        ui.label(format!("Any SSH client reaches the machines at {listen} with the login user+machine (e.g. root+nas)."));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(tr("Login rules", "Regole di accesso")).strong());
-            ui.checkbox(&mut self.f.show_passwords, tr("show passwords", "mostra le password"));
+            ui.label(RichText::new("Login rules").strong());
+            ui.checkbox(&mut self.f.show_passwords, "show passwords");
         });
-        ui.label(RichText::new(tr("The most specific rule wins; * means any.", "Vince la regola più specifica; * vuol dire qualsiasi.")).weak());
+        ui.label(RichText::new("The most specific rule wins; * means any. With a public key in a rule for * and * (e.g. the one of your Pageant key, from PuTTYgen), PuTTY and WinSCP opened from here log in with it, no password.").weak());
         let rules = self.ssh["logins"].as_array().cloned().unwrap_or_default();
         egui::Grid::new("rules").striped(true).num_columns(6).spacing([14.0, 8.0]).show(ui, |ui| {
-            for h in ["#", tr("Machines", "Macchine"), tr("Users", "Utenti"), "Password", tr("Keys", "Chiavi"), ""] {
+            for h in ["#", "Machines", "Users", "Password", "Keys", ""] {
                 ui.label(RichText::new(h).strong());
             }
             ui.end_row();
@@ -952,28 +917,28 @@ impl App {
                 let pw = s(&r["password"]).to_string();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(if self.f.show_passwords { pw.clone() } else { "••••••••".into() }).monospace());
-                    if ui.small_button(tr("copy", "copia")).clicked() {
+                    if ui.small_button("copy").clicked() {
                         self.copy = Some(pw.clone());
-                        self.toast(tr("Password copied", "Password copiata"), false);
+                        self.toast("Password copied", false);
                     }
                 });
                 ui.label(r["keys"].to_string());
-                if ui.small_button(tr("remove", "rimuovi")).clicked() {
-                    self.call(Tag::Done(tr("Rule removed", "Regola rimossa").into()), IpcOp::SshLoginRemove { index });
+                if ui.small_button("remove").clicked() {
+                    self.call(Tag::Done("Rule removed".into()), IpcOp::SshLoginRemove { index });
                 }
                 ui.end_row();
             }
         });
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("New rule", "Nuova regola")).strong());
+        ui.label(RichText::new("New rule").strong());
         ui.horizontal_wrapped(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_hosts).hint_text(tr("machines (comma), * = all", "macchine (virgola), * = tutte")).desired_width(180.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_users).hint_text(tr("users (comma), * = all", "utenti (virgola), * = tutti")).desired_width(160.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_password).hint_text(tr("password (empty: generated)", "password (vuota: generata)")).desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.rule_hosts).hint_text("machines (comma), * = all").desired_width(180.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.rule_users).hint_text("users (comma), * = all").desired_width(160.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.rule_password).hint_text("password (empty: generated)").desired_width(170.0));
         });
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_key).hint_text(tr("OpenSSH public key (optional)", "chiave pubblica OpenSSH (facoltativa)")).desired_width(420.0));
-            if ui.button(tr("Add", "Aggiungi")).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.rule_key).hint_text("public key ssh-ed25519 AAAA… (optional)").desired_width(420.0));
+            if ui.button("Add").clicked() {
                 let split = |s: &str| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
                 let op = IpcOp::SshLoginAdd {
                     hosts: split(&self.f.rule_hosts),
@@ -981,7 +946,7 @@ impl App {
                     password: (!self.f.rule_password.trim().is_empty()).then(|| self.f.rule_password.trim().to_string()),
                     key: (!self.f.rule_key.trim().is_empty()).then(|| self.f.rule_key.trim().to_string()),
                 };
-                self.call(Tag::Done(tr("Rule added", "Regola aggiunta").into()), op);
+                self.call(Tag::Done("Rule added".into()), op);
                 self.f.rule_hosts.clear();
                 self.f.rule_users.clear();
                 self.f.rule_password.clear();
@@ -989,8 +954,8 @@ impl App {
             }
         });
         ui.add_space(10.0);
-        ui.label(RichText::new(tr("Launchers", "Programmi")).strong());
-        ui.label(RichText::new(tr("Edit them in gangli.console ([[launcher]]): {login} {password} {port} {node} {user} are filled in.", "Si modificano in gangli.console ([[launcher]]): {login} {password} {port} {node} {user} vengono compilati.")).weak());
+        ui.label(RichText::new("Launchers").strong());
+        ui.label(RichText::new("Edit them in gangli.console ([[launcher]]): {login} {password} {port} {node} {user} are filled in.").weak());
         for l in self.ssh["launchers"].as_array().cloned().unwrap_or_default() {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(s(&l["name"])).strong());
@@ -1002,15 +967,12 @@ impl App {
     // ----- API -----
 
     fn api_page(&mut self, ui: &mut Ui) {
-        ui.heading(tr("API for programs and AI agents", "API per programmi e agenti AI"));
-        ui.label(RichText::new(tr(
-            "A local HTTP API (127.0.0.1 only) while gangli is open. Each program gets its own token, which you can revoke.",
-            "Un'API HTTP locale (solo 127.0.0.1) mentre gangli è aperto. Ogni programma ha il suo token, che puoi revocare.",
-        )).weak());
+        ui.heading("API for programs and AI agents");
+        ui.label(RichText::new("A local HTTP API (127.0.0.1 only) while gangli is open. Each program gets its own token, which you can revoke.").weak());
         ui.add_space(8.0);
         let mut on = self.api["enabled"].as_bool() == Some(true);
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut on, tr("Enabled", "Attiva")).changed() {
+            if ui.checkbox(&mut on, "Enabled").changed() {
                 self.call(Tag::Done(String::new()), if on { IpcOp::ApiEnable } else { IpcOp::ApiDisable });
             }
             ui.label(RichText::new(s(&self.api["url"])).monospace());
@@ -1019,7 +981,7 @@ impl App {
         if !tokens.is_empty() {
             ui.add_space(6.0);
             egui::Grid::new("tokens").striped(true).num_columns(4).spacing([14.0, 8.0]).show(ui, |ui| {
-                for h in [tr("Name", "Nome"), tr("Scope", "Permessi"), tr("Created", "Creato"), ""] {
+                for h in ["Name", "Scope", "Created", ""] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -1027,28 +989,25 @@ impl App {
                     let name = s(&t["name"]).to_string();
                     ui.label(&name);
                     ui.label(s(&t["scope"]));
-                    ui.label(trf(format!("{} ago", human_ago(now().saturating_sub(t["created"].as_u64().unwrap_or(0)))), format!("{} fa", human_ago(now().saturating_sub(t["created"].as_u64().unwrap_or(0))))));
-                    if ui.small_button(tr("revoke", "revoca")).clicked() {
-                        self.call(Tag::Done(trf(format!("token {name} revoked"), format!("token {name} revocato"))), IpcOp::ApiTokenRemove { name: name.clone() });
+                    ui.label(format!("{} ago", human_ago(now().saturating_sub(t["created"].as_u64().unwrap_or(0)))));
+                    if ui.small_button("revoke").clicked() {
+                        self.call(Tag::Done(format!("token {name} revoked")), IpcOp::ApiTokenRemove { name: name.clone() });
                     }
                     ui.end_row();
                 }
             });
         }
         ui.add_space(10.0);
-        ui.label(RichText::new(tr("New token", "Nuovo token")).strong());
-        ui.label(RichText::new(tr(
-            "read: machines and their details. exec: also commands, jobs, terminals. admin: everything (networks, passwords).",
-            "read: macchine e dettagli. exec: anche comandi, job, terminali. admin: tutto (reti, password).",
-        )).weak());
+        ui.label(RichText::new("New token").strong());
+        ui.label(RichText::new("read: machines and their details. exec: also commands, jobs, terminals. admin: everything this window and the CLI do but the API tokens: for an AI agent that manages the machines (\"Copy instructions for an AI agent\" tells it how).").weak());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.token_name).hint_text(tr("who uses it, e.g. claude", "chi lo usa, es. claude")).desired_width(180.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.token_name).hint_text("who uses it, e.g. claude").desired_width(180.0));
             egui::ComboBox::from_id_salt("scope").selected_text(self.f.token_scope.clone()).show_ui(ui, |ui| {
                 for sc in ["read", "exec", "admin"] {
                     ui.selectable_value(&mut self.f.token_scope, sc.to_string(), sc);
                 }
             });
-            if ui.add_enabled(!self.f.token_name.trim().is_empty(), egui::Button::new(tr("Create", "Crea"))).clicked() {
+            if ui.add_enabled(!self.f.token_name.trim().is_empty(), egui::Button::new("Create")).clicked() {
                 self.call(Tag::Token, IpcOp::ApiTokenAdd { name: self.f.token_name.trim().to_string(), scope: self.f.token_scope.clone() });
                 self.f.token_name.clear();
             }
@@ -1058,21 +1017,18 @@ impl App {
     // ----- This computer -----
 
     fn computer(&mut self, ui: &mut Ui) {
-        ui.heading(tr("This computer", "Questo computer"));
+        ui.heading("This computer");
         ui.label(RichText::new(crate::version_line()).weak());
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("Managed from a console (node)", "Gestito da una console (nodo)")).strong());
+        ui.label(RichText::new("Managed from a console (node)").strong());
         let busy = self.node.job.is_some();
         if self.node.installed {
-            ui.label(tr(
-                "gangli is installed as a service on this computer: it starts with the computer and its consoles have full access.",
-                "gangli è installato come servizio su questo computer: parte con il computer e le sue console hanno accesso completo.",
-            ));
+            ui.label("gangli is installed as a service on this computer: it starts with the computer and its consoles have full access.");
             let bin = self.node.installed_at.clone();
             if let Some(b) = &bin {
                 ui.label(RichText::new(b.display().to_string()).monospace().weak());
             }
-            if ui.add_enabled(!busy, egui::Button::new(tr("Uninstall the service…", "Disinstalla il servizio…"))).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("Uninstall the service…")).clicked() {
                 self.start_job(bin, vec!["uninstall".into()]);
             }
         } else {
@@ -1080,9 +1036,9 @@ impl App {
                 ui.horizontal(|ui| {
                     dot(ui, if *admitted { GREEN } else { AMBER });
                     let state = if *admitted {
-                        trf(format!("admitted as {}", name.clone().unwrap_or_default()), format!("ammesso come {}", name.clone().unwrap_or_default()))
+                        format!("admitted as {}", name.clone().unwrap_or_default())
                     } else {
-                        tr("waiting for a console of the network", "in attesa di una console della rete").to_string()
+                        "waiting for a console of the network".to_string()
                     };
                     ui.label(RichText::new(net).strong());
                     ui.label(state);
@@ -1093,10 +1049,10 @@ impl App {
             }
             let running = self.node.stop.is_some();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text(tr("public code gangli-pub-…", "codice pubblico gangli-pub-…")).desired_width(320.0));
-                if ui.add_enabled(!self.f.node_code.trim().is_empty(), egui::Button::new(tr("Join", "Entra"))).clicked() {
+                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("public code gangli-pub-…").desired_width(320.0));
+                if ui.add_enabled(!self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
                     match crate::state::add_join(self.f.node_code.trim()) {
-                        Ok(name) => self.toast(trf(format!("joined {name}"), format!("entrato in {name}")), false),
+                        Ok(name) => self.toast(format!("joined {name}"), false),
                         Err(e) => self.toast(format!("{e:#}"), true),
                     }
                     self.read_node();
@@ -1105,15 +1061,15 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 if running {
                     dot(ui, GREEN);
-                    ui.label(RichText::new(tr("The node runs in this window", "Il nodo è attivo in questa finestra")).color(GREEN));
-                    if ui.button(tr("Stop", "Ferma")).clicked() {
+                    ui.label(RichText::new("The node runs in this window").color(GREEN));
+                    if ui.button("Stop").clicked() {
                         if let Some(s) = self.node.stop.take() {
                             s.store(true, Ordering::SeqCst);
                         }
                     }
                 } else if ui
-                    .add_enabled(!self.node.networks.is_empty(), egui::Button::new(tr("Run the node now", "Avvia il nodo adesso")))
-                    .on_hover_text(tr("Until gangli is closed, as this user", "Finché gangli è aperto, come questo utente"))
+                    .add_enabled(!self.node.networks.is_empty(), egui::Button::new("Run the node now"))
+                    .on_hover_text("Until gangli is closed, as this user")
                     .clicked()
                 {
                     let stop = Arc::new(AtomicBool::new(false));
@@ -1123,8 +1079,8 @@ impl App {
                 }
                 let code = self.f.node_code.trim().to_string();
                 if ui
-                    .add_enabled(!busy && (!code.is_empty() || !self.node.networks.is_empty()), egui::Button::new(tr("Install as a service…", "Installa come servizio…")))
-                    .on_hover_text(tr("Starts with the computer, full access; asks for the administrator once", "Parte con il computer, accesso completo; chiede l'amministratore una volta"))
+                    .add_enabled(!busy && (!code.is_empty() || !self.node.networks.is_empty()), egui::Button::new("Install as a service…"))
+                    .on_hover_text("Starts with the computer, full access; asks for the administrator once")
                     .clicked()
                 {
                     if let Some(s) = self.node.stop.take() {
@@ -1140,17 +1096,17 @@ impl App {
             });
         }
         if busy {
-            ui.label(RichText::new(tr("Working… (confirm the system's request)", "In corso… (conferma la richiesta del sistema)")).weak());
+            ui.label(RichText::new("Working… (confirm the system's request)").weak());
         }
         if !self.node.job_output.is_empty() {
             ui.add(egui::Label::new(RichText::new(self.node.job_output.trim()).monospace()).wrap());
         }
         ui.add_space(14.0);
-        ui.label(RichText::new(tr("This window", "Questa finestra")).strong());
+        ui.label(RichText::new("This window").strong());
         let mut on = self.node.autostart;
         if ui
-            .checkbox(&mut on, tr("Start gangli at login, in the tray", "Avvia gangli all'accesso, nella tray"))
-            .on_hover_text(tr("Your machines stay listed and the tunnels on without opening gangli", "Le macchine restano in elenco e i tunnel attivi senza aprire gangli"))
+            .checkbox(&mut on, "Start gangli at login, in the tray")
+            .on_hover_text("Your machines stay listed and the tunnels on without opening gangli")
             .changed()
         {
             match super::autostart::set(on) {
@@ -1159,12 +1115,12 @@ impl App {
             }
         }
         ui.add_space(14.0);
-        ui.label(RichText::new(tr("Files", "File")).strong());
-        ui.label(RichText::new(tr("Everything gangli keeps is in these files next to it:", "Tutto quello che gangli conserva è in questi file accanto a lui:")).weak());
+        ui.label(RichText::new("Files").strong());
+        ui.label(RichText::new("Everything gangli keeps is in these files next to it:").weak());
         for p in [crate::paths::node_file(), crate::paths::console_file(), crate::paths::log_file()] {
             ui.label(RichText::new(p.display().to_string()).monospace());
         }
-        if ui.button(tr("Show the folder", "Mostra la cartella")).clicked() {
+        if ui.button("Show the folder").clicked() {
             reveal(&crate::paths::console_file());
         }
         let _ = exe_dir;
@@ -1200,28 +1156,57 @@ impl App {
             return;
         }
         self.tab_active = self.tab_active.min(self.tabs.len() - 1);
-        let mut close = None;
-        ui.horizontal_wrapped(|ui| {
+        // Tabs like a browser's: the active one joins the terminal below it, each has its close button inside
+        // (a middle click closes too); they share the width, between 90 and 230 points each.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let (mut close, mut activate) = (None, None);
+        let tab_w = ((ui.available_width() - 8.0) / self.tabs.len() as f32).clamp(90.0, 230.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             for (i, t) in self.tabs.iter().enumerate() {
+                let active = i == self.tab_active;
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(tab_w, 32.0), egui::Sense::click());
+                let close_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 16.0, rect.center().y), egui::vec2(20.0, 20.0));
+                let close_resp = ui.interact(close_rect, ui.id().with(("tab-close", i)), egui::Sense::click());
+                let v = ui.visuals();
+                let fill = if active {
+                    super::term::BG
+                } else if resp.hovered() {
+                    v.widgets.hovered.weak_bg_fill
+                } else {
+                    v.faint_bg_color
+                };
+                let ink = if active { Color32::from_gray(225) } else { v.text_color() };
+                let p = ui.painter();
+                p.rect_filled(rect, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, fill);
                 let mut title = t.title();
-                if title.chars().count() > 40 {
-                    title = title.chars().take(39).collect::<String>() + "…";
-                }
                 if t.ended() {
                     title = format!("({title})");
                 }
-                if ui.selectable_label(i == self.tab_active, title).clicked() {
-                    self.tab_active = i;
+                let text_rect = egui::Rect::from_min_max(rect.min + egui::vec2(10.0, 0.0), egui::pos2(close_rect.left() - 2.0, rect.max.y));
+                let galley = p.layout_no_wrap(title.clone(), egui::FontId::proportional(13.5), ink);
+                let at = egui::pos2(text_rect.min.x, rect.center().y - galley.size().y / 2.0);
+                p.with_clip_rect(text_rect).galley(at, galley, ink);
+                if close_resp.hovered() {
+                    p.circle_filled(close_rect.center(), 9.0, ink.gamma_multiply(0.25));
                 }
-                if ui.small_button("×").on_hover_text(tr("Close this terminal", "Chiudi questo terminale")).clicked() {
+                p.text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(16.0), ink);
+                if close_resp.clicked() || resp.middle_clicked() {
                     close = Some(i);
+                } else if resp.clicked() {
+                    activate = Some(i);
                 }
-                ui.add_space(6.0);
+                resp.on_hover_text(title);
             }
         });
-        ui.add_space(2.0);
+        if let Some(i) = activate {
+            self.tab_active = i;
+        }
         if let Some(i) = close {
             self.tabs.remove(i);
+            if i < self.tab_active || self.tab_active >= self.tabs.len() {
+                self.tab_active = self.tab_active.saturating_sub(1);
+            }
             return;
         }
         let active = self.tab_active;
@@ -1237,20 +1222,20 @@ impl App {
             ui.set_max_width(560.0);
             match &mut m {
                 Modal::Codes { network, public, private, show_private } => {
-                    ui.heading(trf(format!("Network {network}"), format!("Rete {network}")));
+                    ui.heading(format!("Network {network}"));
                     ui.add_space(6.0);
-                    ui.label(RichText::new(tr("Public code: for the machines to manage", "Codice pubblico: per le macchine da gestire")).strong());
+                    ui.label(RichText::new("Public code: for the machines to manage").strong());
                     ui.add(egui::Label::new(RichText::new(public.as_str()).monospace()).wrap());
                     ui.horizontal(|ui| {
-                        if ui.button(tr("Copy", "Copia")).clicked() {
+                        if ui.button("Copy").clicked() {
                             self.copy = Some(public.clone());
                         }
-                        if ui.button(tr("Prepare a gangli with it…", "Prepara un gangli con questo…")).on_hover_text(tr("A copy of this program that joins the network by itself: send it to whoever needs help", "Una copia di questo programma che entra da sola nella rete: mandala a chi va aiutato")).clicked() {
+                        if ui.button("Prepare a gangli with it…").on_hover_text("A copy of this program that joins the network by itself: send it to whoever needs help").clicked() {
                             let ext = if cfg!(windows) { ".exe" } else { "" };
                             let out = exe_dir().join(format!("gangli-{network}{ext}"));
                             match std::env::current_exe().map_err(anyhow::Error::from).and_then(|me| crate::embed::pack(&me, &out, public)) {
                                 Ok(()) => {
-                                    self.toast(trf(format!("ready: {}", out.display()), format!("pronto: {}", out.display())), false);
+                                    self.toast(format!("ready: {}", out.display()), false);
                                     reveal(&out);
                                 }
                                 Err(e) => self.toast(format!("{e:#}"), true),
@@ -1258,28 +1243,38 @@ impl App {
                         }
                     });
                     ui.add_space(10.0);
-                    ui.label(RichText::new(tr("Private code: makes a console an owner of the network", "Codice privato: rende una console proprietaria della rete")).strong().color(AMBER));
-                    ui.label(RichText::new(tr("Keep it safe and never put it on a managed machine. It cannot be revoked.", "Conservalo bene e non metterlo mai su una macchina gestita. Non si può revocare.")).weak());
+                    ui.label(RichText::new("Private code: makes a console an owner of the network").strong().color(AMBER));
+                    ui.label(RichText::new("Keep it safe and never put it on a managed machine. It cannot be revoked.").weak());
                     if *show_private {
                         ui.add(egui::Label::new(RichText::new(private.as_str()).monospace()).wrap());
                     }
                     ui.horizontal(|ui| {
-                        ui.checkbox(show_private, tr("show", "mostra"));
-                        if ui.button(tr("Copy", "Copia")).clicked() {
+                        ui.checkbox(show_private, "show");
+                        if ui.button("Copy").clicked() {
                             self.copy = Some(private.clone());
                         }
                     });
                 }
-                Modal::Token { name, token, url } => {
-                    ui.heading(trf(format!("Token {name}"), format!("Token {name}")));
-                    ui.label(tr("Shown only now: copy it into the program that uses it.", "Si vede solo adesso: copialo nel programma che lo usa."));
+                Modal::Token { name, token, url, instructions } => {
+                    ui.heading(format!("Token {name}"));
+                    ui.label("Shown only now: copy it into the program that uses it.");
                     ui.add(egui::Label::new(RichText::new(token.as_str()).monospace()).wrap());
                     ui.label(RichText::new(format!("{url}   Authorization: Bearer …")).monospace().weak());
-                    if ui.button(tr("Copy", "Copia")).clicked() {
-                        self.copy = Some(token.clone());
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy the token").clicked() {
+                            self.copy = Some(token.clone());
+                        }
+                        if ui
+                            .button("Copy instructions for an AI agent")
+                            .on_hover_text("The token, the address and how to list, reach and command the machines: paste it into the agent's prompt or a file it reads")
+                            .clicked()
+                        {
+                            self.copy = Some(instructions.clone());
+                            self.toast("Instructions copied", false);
+                        }
+                    });
                     if self.api["enabled"].as_bool() != Some(true) {
-                        ui.label(RichText::new(tr("The API is off: turn it on to use the token.", "L'API è spenta: attivala per usare il token.")).color(AMBER));
+                        ui.label(RichText::new("The API is off: turn it on to use the token.").color(AMBER));
                     }
                 }
                 Modal::Confirm { text, .. } => {
@@ -1289,14 +1284,14 @@ impl App {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if let Modal::Confirm { op, done, .. } = &m {
-                    if ui.button(RichText::new(tr("Yes", "Sì")).color(RED)).clicked() {
+                    if ui.button(RichText::new("Yes").color(RED)).clicked() {
                         self.call(Tag::Done(done.clone()), op.clone());
                         keep = false;
                     }
-                    if ui.button(tr("Cancel", "Annulla")).clicked() {
+                    if ui.button("Cancel").clicked() {
                         keep = false;
                     }
-                } else if ui.button(tr("Close", "Chiudi")).clicked() {
+                } else if ui.button("Close").clicked() {
                     keep = false;
                 }
             });
@@ -1327,10 +1322,10 @@ fn link_label(ui: &mut Ui, n: &NodeView) {
     match (&n.path, n.online) {
         (Some(p), true) if p.relay => {
             ui.label(RichText::new(format!("relay {} ms", p.rtt_ms)).color(AMBER))
-                .on_hover_text(tr("Through a relay server: slower. Direct links need UDP to get through.", "Passa da un server relay: più lento. Il collegamento diretto ha bisogno che passi l'UDP."));
+                .on_hover_text("Through a relay server: slower. Direct links need UDP to get through.");
         }
         (Some(p), true) => {
-            ui.label(RichText::new(format!("{} {} ms", tr("direct", "diretto"), p.rtt_ms)).color(GREEN));
+            ui.label(RichText::new(format!("{} {} ms", "direct", p.rtt_ms)).color(GREEN));
         }
         _ => {
             ui.label("");
