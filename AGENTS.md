@@ -83,6 +83,7 @@ scripts/box-build.sh     what runs on the build machine (one target OS per run)
 scripts/box-test.sh      end-to-end test on the build machine (service, console, exec, GUI, update)
 scripts/gui-drive.sh     drives the Linux GUI with xdotool (WSLg) for tests
 scripts/tray-test.py     a StatusNotifier watcher + host: prints gangli's Linux tray, clicks its menu
+scripts/tray-panel.sh    a real tray in WSLg (xfce4-panel, notification area only) for GUI tests
 .tools/               git-ignored: build-box clone, box-password
 ```
 
@@ -129,6 +130,7 @@ bash scripts/remote-build.sh --test     # also run scripts/box-test.sh on each r
   `out/box-<os>/gui-<os>.png`).
 - GUI, with build-box binaries (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
   gangli gui` saves the window as drawn and quits (read the PNG to check it); `GANGLI_GUI_TEST_TRAY=1` checks
-  close-to-tray and reopen; `scripts/tray-test.py` stands in for a desktop tray on Linux; `scripts/gui-drive.sh`
+  close-to-tray and reopen; on Linux `scripts/tray-panel.sh start` runs a real tray (xfce4-panel) in WSLg, and
+  `scripts/tray-test.py` is a scriptable stand-in; `scripts/gui-drive.sh`
   clicks and types with xdotool. In WSL use another console port than the Windows side (`[console] port`):
   WSL2 forwards localhost, so both cannot own 7373.

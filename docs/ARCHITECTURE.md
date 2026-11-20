@@ -372,7 +372,8 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   window as drawn and quits (both backends); `GANGLI_GUI_TEST_TRAY=1` closes the window at 2 s and opens it
   from the tray at 5 s, logging the window state (Windows: as the system sees it); `scripts/tray-test.py`
   is a StatusNotifier watcher + host that prints gangli's tray and clicks its menu; `scripts/gui-drive.sh`
-  drives the Linux GUI with xdotool. Verified 2026-11-20: Linux in WSLg (clicks, typing with accents / `@`
+  drives the Linux GUI with xdotool; `scripts/tray-panel.sh` runs a real tray (xfce4-panel 4.18) in WSLg: the icon
+  shows, a left click opens the window, the panel's menu opens terminals and quits. Verified 2026-11-20: Linux in WSLg (clicks, typing with accents / `@`
   / `€`, copy and paste both ways, tray menu over D-Bus, close to tray and back, second instance, GUI on a
   `console run`), Windows (pages, close to tray and back). macOS: builds on build-box, not run yet.
 - **Link quality in the GUI**: every machine shows whether its traffic goes **direct** (hole-punching worked)
