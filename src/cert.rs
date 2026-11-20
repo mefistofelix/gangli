@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::util::now;
 
 pub const TEN_YEARS: u64 = 10 * 365 * 86400;
-pub const ONE_YEAR: u64 = 365 * 86400;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CertKind {
-    Master,
-    Agent,
-    Client,
+    /// A managed machine.
+    Node,
+    /// One of the owner's consoles.
+    Console,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -94,24 +94,24 @@ mod tests {
     fn issue_and_verify() {
         let net = SecretKey::generate();
         let node = SecretKey::generate().public();
-        let c = Cert::issue(&net, &node.to_string(), CertKind::Agent, "nas", ONE_YEAR);
-        c.verify(&net.public(), &node, CertKind::Agent).unwrap();
-        assert!(c.verify(&net.public(), &node, CertKind::Client).is_err());
+        let c = Cert::issue(&net, &node.to_string(), CertKind::Node, "nas", TEN_YEARS);
+        c.verify(&net.public(), &node, CertKind::Node).unwrap();
+        assert!(c.verify(&net.public(), &node, CertKind::Console).is_err());
         let other = SecretKey::generate().public();
-        assert!(c.verify(&net.public(), &other, CertKind::Agent).is_err());
+        assert!(c.verify(&net.public(), &other, CertKind::Node).is_err());
         let mut tampered = c.clone();
         tampered.body.name = "evil".into();
-        assert!(tampered.verify(&net.public(), &node, CertKind::Agent).is_err());
+        assert!(tampered.verify(&net.public(), &node, CertKind::Node).is_err());
         let foreign = SecretKey::generate();
-        assert!(c.verify(&foreign.public(), &node, CertKind::Agent).is_err());
+        assert!(c.verify(&foreign.public(), &node, CertKind::Node).is_err());
     }
 
     #[test]
     fn survives_json_roundtrip() {
         let net = SecretKey::generate();
         let node = SecretKey::generate().public();
-        let c = Cert::issue(&net, &node.to_string(), CertKind::Client, "laptop", ONE_YEAR);
+        let c = Cert::issue(&net, &node.to_string(), CertKind::Console, "laptop", TEN_YEARS);
         let back: Cert = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
-        back.verify(&net.public(), &node, CertKind::Client).unwrap();
+        back.verify(&net.public(), &node, CertKind::Console).unwrap();
     }
 }

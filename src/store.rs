@@ -23,9 +23,11 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write a file readable only by its owner, atomically.
+/// Write a file readable only by its owner, atomically. Concurrent writers each use their own temp file.
 pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
     {
         let mut o = OpenOptions::new();
         o.write(true).create(true).truncate(true);

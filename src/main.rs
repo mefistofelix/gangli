@@ -1,12 +1,18 @@
-//! gangli — one binary, three roles (agent, master, client). See docs/ARCHITECTURE.md.
+//! gangli — one binary, two roles: the **node** (a managed machine; run by hand or installed as a system
+//! service) and the **console** (the owner's side; never a service). See docs/ARCHITECTURE.md.
 
 mod cert;
-mod client;
 mod code;
-mod daemon;
+mod console;
+mod console_cmd;
+mod directory;
 mod elevate;
+mod embed;
+mod http;
 mod inventory;
-mod master;
+mod ipc;
+mod node;
+mod node_cmd;
 mod paths;
 mod proto;
 mod service;
@@ -14,9 +20,6 @@ mod state;
 mod store;
 mod util;
 
-use std::future::Future;
-#[cfg(unix)]
-use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -35,7 +38,8 @@ pub(crate) fn version_line() -> String {
 #[command(
     name = "gangli",
     disable_version_flag = true,
-    about = "Peer-to-peer remote management: agent, control center and client in one binary."
+    about = "Remote management of your machines and your family's, peer to peer.\n\
+             node: a machine to manage (public code). console: where you manage them (private code)."
 )]
 struct Cli {
     /// Machine-readable output (for scripts and LLM agents).
@@ -47,76 +51,144 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install the system service and start it at boot (asks for elevation once).
-    Install {
-        /// Join code to enroll with; defaults to a code embedded in the binary, if any.
+    /// node: run the node now as this user, no install (uses the embedded public code by default).
+    Node {
+        /// Public network code.
         #[arg(long)]
-        join: Option<String>,
+        code: Option<String>,
     },
-    /// Stop and remove the system service and its state (asks for elevation once).
+    /// node: install the node as a system service, started at boot, full access (one elevation prompt).
+    Install {
+        /// Public network code; default: the one embedded in the binary, if any.
+        #[arg(long, alias = "invite", alias = "join")]
+        code: Option<String>,
+    },
+    /// node: stop and remove the service and its state (one elevation prompt).
     Uninstall,
-    /// Run the service in the foreground. `--service` is set by the Windows service manager.
+    /// node: the service body (used by the OS service manager).
+    #[command(hide = true)]
     Run {
-        #[arg(long, hide = true)]
+        #[arg(long)]
         service: bool,
     },
-    /// This machine's networks and their state.
-    Status,
-    /// Let a master manage this machine (join code from `gangli master code`).
+    /// node: join a network with its public code.
     Join { code: String },
-    /// Stop being managed through a network.
+    /// node: leave a network.
     Leave { network: String },
-    /// Control center: networks run by this machine.
+    /// node: this machine's networks.
+    Status,
+    /// console: networks.
     #[command(subcommand)]
-    Master(MasterCmd),
-    /// Client: pair with a network once (code from `gangli master pair`).
-    Pair {
-        code: String,
-        /// Name of this client as the master will list it (default: hostname).
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// Client: list the machines of every paired network.
-    Nodes,
-    /// Client: ask a machine directly for its details (`name` or `name.network`).
+    Network(NetworkCmd),
+    /// console: the machines (live when a console is open).
+    Nodes { network: Option<String> },
+    /// console: details of a machine, asked to it now (`name` or `name.network`).
     Info { node: String },
+    /// console: remove a machine from the network.
+    Forget { node: String },
+    /// console: keep a console open without the GUI (in this terminal).
+    #[command(subcommand)]
+    Console(ConsoleCmd),
+    /// console: the local API for programs and LLM agents (off by default, tokens).
+    #[command(subcommand)]
+    Api(ApiCmd),
+    /// Copy a gangli binary with a public code embedded: running it is enough to become a node.
+    Pack {
+        /// Public network code to embed.
+        #[arg(long)]
+        code: String,
+        /// Binary to copy (default: this one); e.g. a release for another OS.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Output file.
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
     /// Print the version.
     Version,
 }
 
 #[derive(Subcommand)]
-enum MasterCmd {
-    /// Create a network; this machine becomes its master.
+enum NetworkCmd {
+    /// Create a network: prints its public code (for machines) and private code (for consoles).
     Create { name: String },
-    /// Make a join code for machines to manage.
-    Code {
-        network: String,
-        /// How many machines may use it (default: unlimited).
+    /// Add a network to this console with its private code.
+    Add {
+        code: String,
+        /// Local name (default: the network's name).
         #[arg(long)]
-        uses: Option<u32>,
-        /// Valid for this many days (default: forever).
-        #[arg(long)]
-        days: Option<u64>,
-        /// A note shown in the code list.
-        #[arg(long)]
-        label: Option<String>,
+        name: Option<String>,
     },
-    /// Make a one-time pairing code (15 minutes) for your client.
-    Pair { network: String },
-    /// Machines of the networks run here.
-    Nodes { network: Option<String> },
+    /// Show the public and private codes of a network.
+    Codes { name: String },
+    /// Remove a network from this console only.
+    Remove { name: String },
 }
 
-fn block_on<F: Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("cannot start the async runtime")
-        .block_on(f)
+#[derive(Subcommand)]
+enum ApiCmd {
+    /// Whether it is enabled, its address, the tokens.
+    Status,
+    /// Enable it (on 127.0.0.1, default port 7373).
+    Enable {
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Disable it (the tokens are kept).
+    Disable,
+    /// Access tokens.
+    #[command(subcommand)]
+    Token(TokenCmd),
+}
+
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Make a token (printed once).
+    Add {
+        name: String,
+        /// read: status, machines, details. admin: also networks and removing machines.
+        #[arg(long, default_value = "read")]
+        scope: String,
+    },
+    /// Revoke a token.
+    Remove { name: String },
+    /// The tokens (names and scopes, never the values).
+    List,
+}
+
+#[derive(Subcommand)]
+enum ConsoleCmd {
+    /// Open a console in the foreground (live sessions, CLI answers at once).
+    Run,
+    /// Close the open console.
+    Stop,
+    /// Console id and networks.
+    Status,
 }
 
 fn io_err(e: std::io::Error) -> anyhow::Error {
     anyhow::anyhow!("{e}")
+}
+
+fn pack(code_s: &str, from: Option<std::path::PathBuf>, out: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let code::Code::Public { .. } = code::decode(code_s)? else {
+        anyhow::bail!("only a public code can be embedded (never the private one)");
+    };
+    let from = match from {
+        Some(p) => p,
+        None => std::env::current_exe()?,
+    };
+    embed::pack(&from, out, code_s.trim())?;
+    let macho = embed::is_macho(out);
+    if json {
+        println!("{}", serde_json::json!({ "packed": out, "needs_signing": macho }));
+    } else {
+        println!("{} ready: running it makes the machine a node", out.display());
+        if macho {
+            println!("macOS binary: sign it again on a Mac (`codesign -s - {}`), or ship the original with a gangli.code file next to it", out.display());
+        }
+    }
+    Ok(())
 }
 
 fn main() {
@@ -136,6 +208,9 @@ fn main() {
     let result: anyhow::Result<()> = match cli.command {
         None => {
             println!("{}", version_line());
+            if embed::embedded_code().is_some() {
+                println!("this binary carries a network code: `gangli node` to start, `gangli install` to install");
+            }
             println!("run `gangli --help` for the commands");
             Ok(())
         }
@@ -147,12 +222,12 @@ fn main() {
             }
             Ok(())
         }
-        Some(Command::Install { join }) => {
-            let embedded: Option<String> = None; // embedded trailer reader lands with `pack` (phase 8)
-            let code = join.or(embedded);
+        Some(Command::Node { code }) => node_cmd::run(code),
+        Some(Command::Install { code }) => {
+            let code = code.or_else(embed::embedded_code);
             match code.as_deref().map(code::decode) {
                 Some(Err(e)) => Err(e),
-                Some(Ok(c)) if c.kind != code::Kind::Join => Err(anyhow::anyhow!("that is a client pairing code, not a join code")),
+                Some(Ok(code::Code::Private { .. })) => Err(anyhow::anyhow!("that is a private code: never put it on a managed machine")),
                 _ => service::install(code.as_deref()).map_err(io_err),
             }
         }
@@ -164,18 +239,30 @@ fn main() {
                 agent_run().map_err(io_err)
             }
         }
-        Some(Command::Status) => master::status(json),
-        Some(Command::Join { code }) => master::join(&code, json),
-        Some(Command::Leave { network }) => master::leave(&network, json),
-        Some(Command::Master(m)) => match m {
-            MasterCmd::Create { name } => master::create(&name, json),
-            MasterCmd::Code { network, uses, days, label } => master::join_code(&network, uses, days, label, json),
-            MasterCmd::Pair { network } => master::pair_code(&network, json),
-            MasterCmd::Nodes { network } => master::nodes(network.as_deref(), json),
-        },
-        Some(Command::Pair { code, name }) => block_on(client::pair(&code, name, json)),
-        Some(Command::Nodes) => block_on(client::nodes(json)),
-        Some(Command::Info { node }) => block_on(client::info(&node, json)),
+        Some(Command::Join { code }) => node_cmd::join(&code, json),
+        Some(Command::Leave { network }) => node_cmd::leave(&network, json),
+        Some(Command::Status) => node_cmd::status(json),
+        Some(Command::Network(NetworkCmd::Create { name })) => console_cmd::network_create(&name, json),
+        Some(Command::Network(NetworkCmd::Add { code, name })) => console_cmd::network_add(&code, name, json),
+        Some(Command::Network(NetworkCmd::Codes { name })) => console_cmd::network_codes(&name, json),
+        Some(Command::Network(NetworkCmd::Remove { name })) => console_cmd::network_remove(&name, json),
+        Some(Command::Nodes { network }) => console_cmd::nodes(network, json),
+        Some(Command::Info { node }) => console_cmd::info(&node, json),
+        Some(Command::Forget { node }) => console_cmd::forget(&node, json),
+        Some(Command::Console(ConsoleCmd::Run)) => console::run_foreground(),
+        Some(Command::Console(ConsoleCmd::Stop)) => console_cmd::stop(json),
+        Some(Command::Console(ConsoleCmd::Status)) => console_cmd::status(json),
+        Some(Command::Api(a)) => console_cmd::api(
+            match a {
+                ApiCmd::Status | ApiCmd::Token(TokenCmd::List) => ipc::IpcOp::ApiStatus,
+                ApiCmd::Enable { port } => ipc::IpcOp::ApiEnable { port },
+                ApiCmd::Disable => ipc::IpcOp::ApiDisable,
+                ApiCmd::Token(TokenCmd::Add { name, scope }) => ipc::IpcOp::ApiTokenAdd { name, scope },
+                ApiCmd::Token(TokenCmd::Remove { name }) => ipc::IpcOp::ApiTokenRemove { name },
+            },
+            json,
+        ),
+        Some(Command::Pack { code, from, out }) => pack(&code, from, &out, json),
     };
     if let Err(e) = result {
         if json {
@@ -187,46 +274,25 @@ fn main() {
     }
 }
 
-/// The service body in the foreground (Linux / macOS service, or `gangli run` by hand).
+/// The node in the foreground (Linux / macOS service, `gangli node`).
 pub(crate) fn agent_run() -> std::io::Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
-    #[cfg(unix)]
-    install_sigterm(stop.clone());
-    agent_loop(stop);
+    agent_loop(Arc::new(AtomicBool::new(false)));
     Ok(())
 }
 
 /// Shared by the foreground run and the Windows service handler, which sets `stop`.
 pub(crate) fn agent_loop(stop: Arc<AtomicBool>) {
-    daemon::run_blocking(stop);
+    node::run_blocking(stop);
 }
 
-/// Timestamped line to `service.log` in the state dir, and to stderr (visible when run by hand).
+/// Timestamped line to `node.log` in the node's state dir, and to stderr (visible when run by hand).
 pub(crate) fn log_line(msg: &str) {
     use std::io::Write;
     let line = format!("{} {msg}", util::now());
     eprintln!("{line}");
-    let path = paths::state_dir().join("service.log");
+    let path = paths::node_dir().join("node.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
-    }
-}
-
-#[cfg(unix)]
-static STOP_FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-
-#[cfg(unix)]
-fn install_sigterm(stop: Arc<AtomicBool>) {
-    // The C signal handler can only reach a static, so stash the flag there.
-    let _ = STOP_FLAG.set(stop);
-    extern "C" fn handler(_sig: libc::c_int) {
-        if let Some(f) = STOP_FLAG.get() {
-            f.store(true, Ordering::SeqCst);
-        }
-    }
-    unsafe {
-        libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
-        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
     }
 }
 
@@ -241,10 +307,12 @@ mod tests {
 
     #[test]
     fn cli_parses() {
-        let cli = super::Cli::try_parse_from(["gangli", "install", "--join", "abc"]).unwrap();
-        assert!(matches!(cli.command, Some(super::Command::Install { join: Some(_) })));
-        let cli = super::Cli::try_parse_from(["gangli", "master", "code", "home", "--uses", "3", "--json"]).unwrap();
+        let cli = super::Cli::try_parse_from(["gangli", "install", "--code", "abc"]).unwrap();
+        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_) })));
+        let cli = super::Cli::try_parse_from(["gangli", "install", "--invite", "abc"]).unwrap();
+        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_) })));
+        let cli = super::Cli::try_parse_from(["gangli", "network", "add", "k", "--json"]).unwrap();
         assert!(cli.json);
-        assert!(matches!(cli.command, Some(super::Command::Master(super::MasterCmd::Code { uses: Some(3), .. }))));
+        assert!(matches!(cli.command, Some(super::Command::Network(super::NetworkCmd::Add { .. }))));
     }
 }

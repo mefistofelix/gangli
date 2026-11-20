@@ -1,9 +1,10 @@
-//! systemd integration. The unit runs `gangli run` as root, restarts on failure, and waits for the network.
+//! systemd integration. The unit runs `gangli run` from gangli's own folder as root, restarts on failure,
+//! and waits for the network. The unit file is the only thing written outside that folder.
 
 use std::io::{self, Write};
 use std::process::Command;
 
-use crate::paths::{install_bin, SERVICE_NAME};
+use crate::paths::SERVICE_NAME;
 
 fn unit_path() -> String {
     format!("/etc/systemd/system/{SERVICE_NAME}.service")
@@ -11,10 +12,7 @@ fn unit_path() -> String {
 
 pub fn install(join: Option<&str>) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = install_bin();
-    super::copy_self_to(&bin)?;
-    super::secure_dir_io()?;
-    super::record_join(join)?;
+    let bin = super::prepare_install(join)?;
 
     let unit = format!(
         "[Unit]\n\
@@ -24,13 +22,15 @@ pub fn install(join: Option<&str>) -> io::Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={bin} run\n\
+         ExecStart=\"{bin}\" run\n\
+         WorkingDirectory={dir}\n\
          Restart=always\n\
          RestartSec=5\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
-        bin = bin.display()
+        bin = bin.display(),
+        dir = crate::paths::exe_dir().display()
     );
     let mut f = std::fs::File::create(unit_path())?;
     f.write_all(unit.as_bytes())?;
@@ -47,9 +47,8 @@ pub fn uninstall() -> io::Result<()> {
     let _ = Command::new("systemctl").args(["disable", "--now", SERVICE_NAME]).status();
     let _ = std::fs::remove_file(unit_path());
     let _ = Command::new("systemctl").arg("daemon-reload").status();
-    let _ = std::fs::remove_dir_all(crate::paths::state_dir());
-    let _ = std::fs::remove_file(install_bin());
-    println!("removed the gangli service");
+    super::finish_uninstall()?;
+    println!("removed the gangli service; the node keeps its identity in gangli-data/node (delete the folder to remove everything)");
     Ok(())
 }
 

@@ -19,17 +19,18 @@ rustc --version
 
 case "$OS" in
 linux)
-  # zig as the C toolchain / linker so the binaries need only glibc 2.28
+  # zig as the C toolchain / linker; musl, statically linked: the binaries need nothing on the system
   [ -x "$CACHE/venv/bin/python3" ] || python3 -m venv "$CACHE/venv"
   "$CACHE/venv/bin/python3" -c 'import ziglang' 2> /dev/null || "$CACHE/venv/bin/pip" install -q 'ziglang<0.15'
   export PATH="$CACHE/venv/bin:$PATH"
   [ -x "$CACHE/tools/bin/cargo-zigbuild" ] || cargo install -q --locked --root "$CACHE/tools" cargo-zigbuild
   export PATH="$CACHE/tools/bin:$PATH"
-  rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu > /dev/null
+  rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl > /dev/null
   cargo test --release
   for A in x86_64 aarch64; do
-    cargo zigbuild --release --target "$A-unknown-linux-gnu.2.28"
-    cp "$CARGO_TARGET_DIR/$A-unknown-linux-gnu/release/gangli" "$OUT/gangli-linux-$A"
+    cargo zigbuild --release --target "$A-unknown-linux-musl"
+    cp "$CARGO_TARGET_DIR/$A-unknown-linux-musl/release/gangli" "$OUT/gangli-linux-$A"
+    file "$OUT/gangli-linux-$A" || true
   done
   ;;
 windows)
@@ -49,4 +50,6 @@ macos)
   ;;
 *) echo "unknown build-target $OS"; exit 2;;
 esac
+# the resolved dependency versions come back too (committed: reproducible builds)
+cp Cargo.lock "$OUT/Cargo.lock"
 ls -la "$OUT"

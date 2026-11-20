@@ -6,25 +6,36 @@ and commit messages in English.
 ## What this is
 
 gangli is a remote management tool for the owner's machines and those of family and friends: one binary for
-Windows, Linux and macOS with three roles (agent, master / control center, client), peer-to-peer over iroh, no
-open ports, resilient to disconnects and slow networks. The design and the decisions taken with the owner are
+Windows, Linux and macOS with two roles (**node**: a managed machine, system service; **console**: the
+owner's side, a user process), peer-to-peer over iroh, no open ports, no server, resilient to disconnects and
+slow networks. The design and the decisions taken with the owner are
 in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): read it before changing anything structural, and update it
 when a decision changes.
 
 ## Rules (keep them)
 
 - **One binary.** No helper executables, no calling external programs for core features (iroh, ssh, PTY,
-  terminal are libraries). Launching the user's own tools (PuTTY, ssh) from the client is fine.
+  terminal are libraries). Launching the user's own tools (PuTTY, ssh) from the console is fine; so is calling the
+  OS service managers (`systemctl`, `launchctl`, `icacls`) and elevation tools (`osascript`, `pkexec`).
 - **No inbound ports, ever.** Every listener is either iroh (peer-authenticated) or bound to `127.0.0.1` /
   local IPC.
 - **Authenticate before acting.** The peer's endpoint id is authenticated by iroh's handshake; every request
-  must then prove its right before anything is done: a client certificate naming that endpoint id, signed by
-  the network key (and, on the master, still in the paired-clients list), or on a master a valid join /
-  pairing secret. Anything else gets an error answer and nothing more.
-- **The master role is the network private key**, never a flag in a join code. Join codes and embedded
-  binaries must not be able to grant more than "enroll a node".
-- **Agents never accept connections from other agents**, only from clients with a valid certificate.
-- **Secrets** (node keys, network keys, client keys, API tokens, `.tools/box-password`) live in files readable
+  must then prove its right before anything is done: a certificate signed by the network key that names that
+  endpoint id (console certificate towards a node, node certificate towards a console), or a valid invite /
+  join secret (public code) towards a console. Anything else gets an error answer and nothing more.
+- **A network is its key.** The private code (the key) makes a console an owner; the public code and an
+  embedded binary must never grant more than "become a node". Only a public code may be embedded or put on a
+  managed machine.
+- **Nodes never talk to other nodes**, only to consoles with a valid certificate.
+- **The console is never a service or a background daemon**: it lives in the GUI / tray, in `console run`,
+  or in a one-shot CLI process. The node may run by hand or as a service.
+- **No polling of nodes.** Presence comes from live sessions; a node sends traffic only for pings on an open
+  session, knocks on events (start, address change, session drop) and inventory changes. A periodic network
+  call from the node is a regression.
+- **Portable.** Everything gangli keeps goes in `gangli-data/` next to the executable (`paths.rs`); never a
+  system or user folder, never `%APPDATA%`, `~/.config`, `/var/lib`. Only the OS service registration is
+  written elsewhere, by `install`.
+- **Secrets** (node keys, console keys, network keys, API tokens, `.tools/box-password`) live in files readable
   only by their owner (root / SYSTEM / the user) and are never printed, logged or committed.
 - **No consent UI on managed machines** (owner's decision), but nothing hidden either: normal service name,
   normal path, working `uninstall`.
@@ -39,16 +50,22 @@ when a decision changes.
 ```
 Cargo.toml            single crate for now (bin `gangli`); split into a workspace when it grows
 src/main.rs           CLI (clap) and dispatch
-src/daemon.rs         service body: iroh endpoint, master and agent sides of gangli/ctrl/1
-src/client.rs         client commands (pair, nodes, info)
-src/master.rs         state commands (master create/code/pair/nodes, join, leave, status)
-src/proto.rs          control protocol messages and the request/answer helper
-src/cert.rs code.rs   certificates; join / pairing codes
-src/state.rs store.rs service state model; locked owner-only JSON files
+src/node.rs           node body (by hand or service): serves console sessions, knocks, pushes inventory
+src/node_cmd.rs       node-side commands (join, leave, status) on the service state
+src/console.rs        console (open or one-shot): live sessions, admission, sync, directory, IPC
+src/console_cmd.rs    console-side commands (network, nodes, info, forget, console)
+src/ipc.rs            CLI ↔ open console (local HTTP + internal token), else a one-shot console
+src/http.rs           minimal HTTP/1.1 of the local API (no dependency)
+src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
+src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
+src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers
+src/cert.rs code.rs   certificates; public / private network codes and derived secrets
+src/state.rs store.rs node state (system or user folder); locked owner-only JSON files
 src/inventory.rs      what a node reports (sysinfo)
 src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec/sudo)
 src/service/          system service per OS (SCM, launchd, systemd)
 docs/ARCHITECTURE.md  design and decisions
+docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
 scripts/remote-build.sh  builds the three OSes on build-box and publishes a release
 scripts/box-build.sh     what runs on the build machine (one target OS per run)
 .tools/               git-ignored: build-box clone, box-password, release signing key
@@ -68,7 +85,7 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
 - The working tree (tracked and new files, not the ignored ones) is staged with a `build.sh` calling
   `scripts/box-build.sh`, sent encrypted with the password in `.tools/box-password` (the secret `BOX_PASSWORD`
   of build-box; same file as the other projects, never print it). Three runs go in parallel: `ubuntu-latest`
-  (linux x86_64 + aarch64, glibc 2.28 via cargo-zigbuild), `windows-latest` (x86_64 msvc, static CRT),
+  (linux x86_64 + aarch64, static musl via cargo-zigbuild), `windows-latest` (x86_64 msvc, static CRT),
   `macos-latest` (universal, ad-hoc signed).
 - Toolchains (rustup, zig, cargo-zigbuild) and the target dir are kept in `$CACHE`, per OS.
 - Logs come back in `out/box-<os>/build.log`.
@@ -80,10 +97,12 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
 ## Testing
 
 - Unit tests run on build-box as part of every build (`cargo test` on the native target of each runner).
-- End to end on one PC, no elevation, no service: development mode with `GANGLI_STATE_DIR` (service state)
-  and `GANGLI_CLIENT_DIR` (client state) pointing at scratch folders. Run a master and an agent as two
-  `gangli run` processes with different state dirs, then pair a client and use `nodes` / `info`; the
-  traffic goes through the real n0 relays and discovery.
+- End to end on one PC, no elevation, no service: `GANGLI_DATA_DIR` replaces `gangli-data/`, one scratch
+  folder per simulated machine. `network create` on a
+  console (`console run` in the background of the test), `node --code` for one or more nodes (each its own
+  state dir), then `nodes` / `info`; kill a node and restart it to check that it shows offline and comes back
+  by itself; a second console dir with `network add <private code>` must find the machines. The traffic
+  goes through the real n0 relays, pkarr relays and the DHT. Close the console with `gangli console stop`.
 - Network behaviour (drops, slow links) is tested with an in-process loss/latency shim on the resumable stream
   layer, not only by hand.
 - Before a release that touches install / service code, try install → join → uninstall on all three OSes.

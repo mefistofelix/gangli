@@ -1,0 +1,1109 @@
+//! The console (section 5 of docs/ARCHITECTURE.md): the owner's side, a user process, never a service.
+//! It lives inside whatever uses it:
+//! - **open** — the GUI / tray, or `gangli console run` in a terminal: keeps one live session per node, so
+//!   the node list is current without asking anybody, and serves the local IPC for the CLI;
+//! - **one-shot** — a CLI command when no console is open: connects, answers, exits.
+//!
+//! Every console holding a network's key (the private code) is an owner of it, with equal rights: it admits
+//! nodes showing the join secret, keeps the public directory up to date, and syncs node, console and
+//! removed lists with the other consoles it finds there.
+//!
+//! Idle cost per online node: a ping every 25 s. Offline nodes are retried quickly right after a drop, then
+//! only every 5 minutes as a safety net (their own knock is what normally brings them back).
+//!
+//! State: `console.key` and `console.json` in the user's client dir; one console process at a time per user
+//! (lock on `console.lock`).
+
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Result};
+use data_encoding::HEXLOWER;
+use iroh::endpoint::{presets, Connection};
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use iroh::{Endpoint, PublicKey, SecretKey};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, Notify};
+
+use crate::cert::{Cert, CertKind, TEN_YEARS};
+use crate::code::{self, Code};
+use crate::directory::{self, Directory};
+use crate::inventory::Inventory;
+use crate::ipc::{IpcOp, NodeView, PortFile, PORT_FILE};
+use crate::proto::{self, Admission, ConsoleRec, Frame, NodeRec, Req, Resp};
+use crate::store;
+use crate::util::{eq_ct, now, random16, slug, unique_name, Ctx};
+
+pub const FILE: &str = "console.json";
+pub const KEY_FILE: &str = "console.key";
+const LOCK_FILE: &str = "console.lock";
+const PING_EVERY: Duration = Duration::from_secs(25);
+const PONG_TIMEOUT_SECS: u64 = 70;
+const SWEEP_EVERY: Duration = Duration::from_secs(300);
+const RECENT: u64 = 600;
+const REPUBLISH_EVERY: Duration = Duration::from_secs(1800);
+const ONE_SHOT_WAIT: Duration = Duration::from_secs(6);
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct ConsoleState {
+    #[serde(default)]
+    pub networks: Vec<ConsoleNet>,
+    #[serde(default)]
+    pub api: ApiConfig,
+}
+
+/// The console's API for programs and LLM agents: off unless enabled (CLI or GUI), on a fixed local port,
+/// with named tokens. The local CLI / GUI use their own internal token and never need this.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ApiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub tokens: Vec<ApiToken>,
+}
+
+fn default_api_port() -> u16 {
+    7373
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        ApiConfig { enabled: false, port: default_api_port(), tokens: vec![] }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ApiToken {
+    pub name: String,
+    /// `read` or `admin`.
+    pub scope: String,
+    pub token: String,
+    pub created: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ConsoleNet {
+    pub id: String,
+    pub name: String,
+    /// The network key (hex): what makes this console an owner.
+    pub key: String,
+    /// This console's certificate in the network (signed with the key above).
+    pub cert: Cert,
+    #[serde(default)]
+    pub nodes: Vec<NodeRec>,
+    #[serde(default)]
+    pub consoles: Vec<ConsoleRec>,
+    /// Nodes removed with `forget`: their knocks are refused.
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
+fn dir() -> PathBuf {
+    crate::paths::console_dir()
+}
+
+pub(crate) fn clog(msg: &str) {
+    use std::io::Write;
+    let line = format!("{} {msg}", now());
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(dir().join("console.log")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Hold the per-user console lock, or `None` when another console process has it.
+pub fn try_lock() -> Result<Option<File>> {
+    store::ensure_dir(&dir())?;
+    let f = OpenOptions::new().create(true).truncate(false).write(true).open(dir().join(LOCK_FILE))?;
+    Ok(f.try_lock().is_ok().then_some(f))
+}
+
+struct Live {
+    conn: Arc<Connection>,
+    since: u64,
+    tx: mpsc::UnboundedSender<Frame>,
+}
+
+pub struct Console {
+    me: PublicKey,
+    open: bool,
+    router: OnceLock<Router>,
+    state: Mutex<ConsoleState>,
+    live: Mutex<HashMap<String, Live>>,
+    dialing: Mutex<HashSet<String>>,
+    /// Node id → (next attempt, backoff).
+    retry: Mutex<HashMap<String, (Instant, Duration)>>,
+    /// Network id → directory as last read or published.
+    published: Mutex<HashMap<String, Directory>>,
+    started: Instant,
+    pub stop: Notify,
+    internal_token: OnceLock<String>,
+    api_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+struct Handler {
+    c: Arc<Console>,
+}
+
+impl std::fmt::Debug for Handler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConsoleHandler")
+    }
+}
+
+impl ProtocolHandler for Handler {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        incoming(self.c.clone(), Arc::new(conn)).await;
+        Ok(())
+    }
+}
+
+/// Start a console in this process. `open`: keep sessions, refresh the directory, serve IPC.
+pub async fn start(open: bool) -> Result<Arc<Console>> {
+    let sk = store::secret_key(&dir(), KEY_FILE)?;
+    let me = sk.public();
+    let state: ConsoleState = store::load(&dir(), FILE)?;
+    let ep = Endpoint::builder(presets::N0).secret_key(sk).bind().await.ctx("start endpoint")?;
+    let c = Arc::new(Console {
+        me,
+        open,
+        router: OnceLock::new(),
+        state: Mutex::new(state),
+        live: Mutex::default(),
+        dialing: Mutex::default(),
+        retry: Mutex::default(),
+        published: Mutex::default(),
+        started: Instant::now(),
+        stop: Notify::new(),
+        internal_token: OnceLock::new(),
+        api_task: Mutex::new(None),
+    });
+    let router = Router::builder(ep).accept(proto::ALPN, Handler { c: c.clone() }).spawn();
+    let _ = c.router.set(router);
+    if open {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let token = HEXLOWER.encode(&random16());
+        let _ = c.internal_token.set(token.clone());
+        let pf = PortFile { port, token, pid: std::process::id() };
+        store::write_private(&dir().join(PORT_FILE), &serde_json::to_vec(&pf)?)?;
+        spawn_http(c.clone(), listener);
+        start_api(&c).await;
+        tokio::spawn(manager(c.clone()));
+        tokio::spawn(directory_loop(c.clone()));
+        clog(&format!("{} console open, id {me}", crate::version_line()));
+    }
+    Ok(c)
+}
+
+impl Console {
+    fn endpoint(&self) -> &Endpoint {
+        self.router.get().expect("router set at start").endpoint()
+    }
+
+    pub async fn shutdown(&self) {
+        if self.open {
+            let _ = std::fs::remove_file(dir().join(PORT_FILE));
+        }
+        for l in self.live.lock().unwrap().values() {
+            l.conn.close(0u32.into(), b"console closed");
+        }
+        if let Some(r) = self.router.get() {
+            let _ = r.shutdown().await;
+        }
+    }
+
+    fn save(&self) {
+        let snapshot = self.state.lock().unwrap().clone();
+        match serde_json::to_vec_pretty(&snapshot) {
+            Ok(b) => {
+                if let Err(e) = store::write_private(&dir().join(FILE), &b) {
+                    clog(&format!("cannot save state: {e:#}"));
+                }
+            }
+            Err(e) => clog(&format!("cannot save state: {e}")),
+        }
+    }
+
+    fn console_ids(&self, n: &ConsoleNet) -> Vec<String> {
+        let mut v: Vec<&ConsoleRec> = n.consoles.iter().collect();
+        v.sort_by_key(|c| std::cmp::Reverse(c.seen));
+        let mut ids: Vec<String> = vec![self.me.to_string()];
+        ids.extend(v.into_iter().map(|c| c.id.clone()).filter(|i| *i != self.me.to_string()));
+        ids
+    }
+
+    fn hello_for(&self, net: &str) -> Option<(Cert, Vec<String>)> {
+        let st = self.state.lock().unwrap();
+        st.networks.iter().find(|n| n.id == net).map(|n| (n.cert.clone(), self.console_ids(n)))
+    }
+
+    fn key_of(&self, net: &str) -> Option<SecretKey> {
+        let st = self.state.lock().unwrap();
+        st.networks.iter().find(|n| n.id == net).and_then(|n| store::secret_from_hex(&n.key).ok())
+    }
+
+    fn on_online(&self, node: &str, net: &str, conn: Arc<Connection>, tx: mpsc::UnboundedSender<Frame>, node_name: String, inventory: Inventory) {
+        let t = now();
+        if let Some(old) = self.live.lock().unwrap().insert(node.to_string(), Live { conn, since: t, tx }) {
+            old.conn.close(0u32.into(), b"replaced by a newer session");
+        }
+        self.retry.lock().unwrap().remove(node);
+        {
+            let mut st = self.state.lock().unwrap();
+            if let Some(n) = st.networks.iter_mut().find(|n| n.id == net) {
+                let others: Vec<String> = n.nodes.iter().filter(|x| x.id != node).map(|x| x.name.clone()).collect();
+                if let Some(x) = n.nodes.iter_mut().find(|x| x.id == node) {
+                    x.last_seen = t;
+                    x.inventory = Some(inventory);
+                    // The name in the node's certificate is the network-wide one.
+                    if !node_name.is_empty() && x.name != node_name {
+                        x.name = unique_name(&node_name, others.iter().map(String::as_str));
+                    }
+                }
+            }
+        }
+        self.save();
+    }
+
+    fn on_offline(&self, node: &str, conn: &Arc<Connection>) {
+        let mut live = self.live.lock().unwrap();
+        if live.get(node).is_some_and(|l| Arc::ptr_eq(&l.conn, conn)) {
+            live.remove(node);
+            drop(live);
+            let t = now();
+            {
+                let mut st = self.state.lock().unwrap();
+                for n in st.networks.iter_mut() {
+                    if let Some(x) = n.nodes.iter_mut().find(|x| x.id == node) {
+                        x.last_seen = t;
+                    }
+                }
+            }
+            self.save();
+            self.retry.lock().unwrap().insert(node.to_string(), (Instant::now() + Duration::from_secs(3), Duration::from_secs(3)));
+        }
+    }
+
+    fn on_inventory(&self, node: &str, inventory: Inventory) {
+        {
+            let mut st = self.state.lock().unwrap();
+            for n in st.networks.iter_mut() {
+                if let Some(x) = n.nodes.iter_mut().find(|x| x.id == node) {
+                    x.inventory = Some(inventory.clone());
+                    x.last_seen = now();
+                }
+            }
+        }
+        self.save();
+    }
+
+    /// Tell the live nodes of a network about the current console list.
+    fn push_consoles(&self, net: &str) {
+        let (ids, nodes): (Vec<String>, Vec<String>) = {
+            let st = self.state.lock().unwrap();
+            match st.networks.iter().find(|n| n.id == net) {
+                Some(n) => (self.console_ids(n), n.nodes.iter().map(|x| x.id.clone()).collect()),
+                None => return,
+            }
+        };
+        let live = self.live.lock().unwrap();
+        for id in nodes {
+            if let Some(l) = live.get(&id) {
+                let _ = l.tx.send(Frame::Consoles { ids: ids.clone() });
+            }
+        }
+    }
+
+    /// A node knocks: an admitted node (certificate) or a new one (join secret of the public code).
+    fn knock(&self, peer: &PublicKey, network: &str, cert: Option<Cert>, join: Option<String>, inventory: Inventory) -> Result<Option<Admission>> {
+        let peer_s = peer.to_string();
+        let t = now();
+        let res = {
+            let mut st = self.state.lock().unwrap();
+            let me = self.me.to_string();
+            let n = st.networks.iter_mut().find(|n| n.id == network).ok_or_else(|| anyhow!("unknown network"))?;
+            let key = store::secret_from_hex(&n.key)?;
+            if let Some(cert) = cert {
+                if n.removed.contains(&peer_s) {
+                    bail!("this machine was removed from the network");
+                }
+                cert.verify(&key.public(), peer, CertKind::Node)?;
+                if let Some(x) = n.nodes.iter_mut().find(|x| x.id == peer_s) {
+                    x.inventory = Some(inventory);
+                    if x.cert.is_none() {
+                        x.cert = Some(cert);
+                    }
+                } else {
+                    // Admitted by another console of the network: its certificate is enough.
+                    let name = unique_name(&cert.body.name, n.nodes.iter().map(|x| x.name.as_str()));
+                    n.nodes.push(NodeRec { id: peer_s.clone(), name, joined: t, last_seen: t, inventory: Some(inventory), cert: Some(cert) });
+                }
+                None
+            } else {
+                let join = join.ok_or_else(|| anyhow!("bad knock"))?;
+                if !eq_ct(&join, &code::join_secret_hex(&key)) {
+                    bail!("wrong public code for this network");
+                }
+                n.removed.retain(|r| r != &peer_s);
+                let old = n.nodes.iter().find(|x| x.id == peer_s).cloned();
+                let name = match &old {
+                    Some(x) => x.name.clone(),
+                    None => unique_name(&inventory.hostname, n.nodes.iter().map(|x| x.name.as_str())),
+                };
+                let cert = Cert::issue(&key, &peer_s, CertKind::Node, &name, TEN_YEARS);
+                n.nodes.retain(|x| x.id != peer_s);
+                n.nodes.push(NodeRec {
+                    id: peer_s.clone(),
+                    name: name.clone(),
+                    joined: old.map(|x| x.joined).unwrap_or(t),
+                    last_seen: t,
+                    inventory: Some(inventory),
+                    cert: Some(cert.clone()),
+                });
+                clog(&format!("machine {name} admitted into {}", n.name));
+                let mut consoles = vec![me.clone()];
+                consoles.extend(n.consoles.iter().map(|c| c.id.clone()).filter(|i| *i != me));
+                Some(Admission { network_name: n.name.clone(), node_name: name, cert, consoles })
+            }
+        };
+        self.save();
+        Ok(res)
+    }
+
+    /// Merge what another console (or the directory) knows.
+    fn merge(&self, net: &str, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String>) -> bool {
+        let mut changed = false;
+        {
+            let mut st = self.state.lock().unwrap();
+            let Some(n) = st.networks.iter_mut().find(|n| n.id == net) else { return false };
+            for r in removed {
+                if !n.removed.contains(&r) {
+                    n.removed.push(r);
+                    changed = true;
+                }
+            }
+            let removed = n.removed.clone();
+            n.nodes.retain(|x| !removed.contains(&x.id));
+            for x in nodes.into_iter().filter(|x| !removed.contains(&x.id)) {
+                match n.nodes.iter_mut().find(|y| y.id == x.id) {
+                    Some(y) => {
+                        if x.last_seen > y.last_seen {
+                            y.last_seen = x.last_seen;
+                            if x.inventory.is_some() {
+                                y.inventory = x.inventory;
+                            }
+                        }
+                        if let Some(c) = x.cert {
+                            if y.cert.is_none() {
+                                y.name = c.body.name.clone();
+                                y.cert = Some(c);
+                                changed = true;
+                            }
+                        }
+                    }
+                    None => {
+                        let name = x.cert.as_ref().map(|c| c.body.name.clone()).unwrap_or(x.name.clone());
+                        let name = unique_name(&name, n.nodes.iter().map(|y| y.name.as_str()));
+                        n.nodes.push(NodeRec { name, ..x });
+                        changed = true;
+                    }
+                }
+            }
+            for c in consoles {
+                match n.consoles.iter_mut().find(|d| d.id == c.id) {
+                    Some(d) => {
+                        d.seen = d.seen.max(c.seen);
+                        if d.name.is_empty() {
+                            d.name = c.name;
+                        }
+                    }
+                    None => {
+                        n.consoles.push(c);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save();
+        }
+        changed
+    }
+
+    fn sync_payload(&self, net: &str) -> Option<(Cert, Vec<NodeRec>, Vec<ConsoleRec>, Vec<String>)> {
+        let st = self.state.lock().unwrap();
+        let n = st.networks.iter().find(|n| n.id == net)?;
+        let mut consoles = n.consoles.clone();
+        if let Some(me) = consoles.iter_mut().find(|c| c.id == self.me.to_string()) {
+            me.seen = now();
+        }
+        Some((n.cert.clone(), n.nodes.clone(), consoles, n.removed.clone()))
+    }
+
+    fn sync_answer(&self, peer: &PublicKey, cert: &Cert, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String>) -> Result<Resp> {
+        let net = cert.body.network.clone();
+        let key = self.key_of(&net).ok_or_else(|| anyhow!("unknown network"))?;
+        cert.verify(&key.public(), peer, CertKind::Console)?;
+        self.merge(&net, nodes, consoles, removed);
+        let (_, nodes, consoles, removed) = self.sync_payload(&net).ok_or_else(|| anyhow!("unknown network"))?;
+        Ok(Resp::Synced { nodes, consoles, removed })
+    }
+
+    fn known_nodes(&self) -> Vec<(String, String, u64)> {
+        let st = self.state.lock().unwrap();
+        st.networks
+            .iter()
+            .flat_map(|n| n.nodes.iter().filter(|x| !n.removed.contains(&x.id)).map(|x| (n.id.clone(), x.id.clone(), x.last_seen)))
+            .collect()
+    }
+
+    fn live_conn(&self, node: &str) -> Option<Arc<Connection>> {
+        self.live.lock().unwrap().get(node).map(|l| l.conn.clone())
+    }
+
+    /// The directory this console would publish for `net` now.
+    fn directory_now(&self, net: &str) -> Option<(SecretKey, Directory)> {
+        let st = self.state.lock().unwrap();
+        let live = self.live.lock().unwrap();
+        let n = st.networks.iter().find(|n| n.id == net)?;
+        let key = store::secret_from_hex(&n.key).ok()?;
+        let mut nodes: Vec<&NodeRec> = n.nodes.iter().filter(|x| !n.removed.contains(&x.id)).collect();
+        nodes.sort_by_key(|x| std::cmp::Reverse((live.contains_key(&x.id), x.last_seen)));
+        Some((key, Directory { name: n.name.clone(), consoles: self.console_ids(n), nodes: nodes.into_iter().map(|x| x.id.clone()).collect() }))
+    }
+}
+
+/// Read the directory, merge it, sync with the consoles listed there, publish if what we know differs.
+async fn refresh_network(c: &Arc<Console>, net: &str, publish: bool) {
+    let Some(key) = c.key_of(net) else { return };
+    let found = directory::resolve(&key.public(), Some(&key)).await.ok();
+    if let Some(d) = &found {
+        let t = now();
+        let nodes = d.nodes.iter().map(|id| NodeRec { id: id.clone(), name: id[..8].to_string(), joined: t, last_seen: 0, inventory: None, cert: None }).collect();
+        let consoles = d.consoles.iter().map(|id| ConsoleRec { id: id.clone(), name: String::new(), seen: 0 }).collect();
+        c.merge(net, nodes, consoles, vec![]);
+        // Sync with the other consoles (both sides merge).
+        let mut tasks = vec![];
+        for other in d.consoles.iter().filter(|o| **o != c.me.to_string()) {
+            let Ok(peer) = other.parse::<PublicKey>() else { continue };
+            let Some((cert, nodes, consoles, removed)) = c.sync_payload(net) else { continue };
+            let (c2, net2) = (c.clone(), net.to_string());
+            tasks.push(tokio::spawn(async move {
+                if let Ok(Resp::Synced { nodes, consoles, removed }) = proto::call(c2.endpoint(), peer, &Req::Sync { cert, nodes, consoles, removed }).await {
+                    c2.merge(&net2, nodes, consoles, removed);
+                }
+            }));
+        }
+        for t in tasks {
+            let _ = t.await;
+        }
+    }
+    if publish {
+        if let Some((key, now_dir)) = c.directory_now(net) {
+            let same = found.as_ref() == Some(&now_dir) || c.published.lock().unwrap().get(net) == Some(&now_dir);
+            if !same {
+                match directory::publish(&key, &now_dir).await {
+                    Ok(()) => {
+                        c.published.lock().unwrap().insert(net.to_string(), now_dir);
+                    }
+                    Err(e) => clog(&format!("directory publish failed: {e:#}")),
+                }
+            } else if let Some(d) = found {
+                c.published.lock().unwrap().insert(net.to_string(), d);
+            }
+        }
+    }
+}
+
+/// Open console: refresh the directories at start, then republish when something changes and every 30 min
+/// (records on the DHT expire after a few hours).
+async fn directory_loop(c: Arc<Console>) {
+    let mut last_full: Option<Instant> = None;
+    loop {
+        let nets: Vec<String> = c.state.lock().unwrap().networks.iter().map(|n| n.id.clone()).collect();
+        let full = last_full.is_none_or(|t| t.elapsed() >= REPUBLISH_EVERY);
+        for net in nets {
+            if full {
+                c.published.lock().unwrap().remove(&net);
+                refresh_network(&c, &net, true).await;
+            } else if let Some((key, d)) = c.directory_now(&net) {
+                if c.published.lock().unwrap().get(&net) != Some(&d) {
+                    if directory::publish(&key, &d).await.is_ok() {
+                        c.published.lock().unwrap().insert(net.clone(), d);
+                    }
+                }
+            }
+        }
+        if full {
+            last_full = Some(Instant::now());
+        }
+        tokio::time::sleep(Duration::from_secs(20)).await;
+    }
+}
+
+/// Open the session on `conn`: Hello / Welcome, then reader, writer and pinger tasks.
+async fn start_session(c: Arc<Console>, conn: Arc<Connection>, net: String, node: String) -> Result<()> {
+    let (cert, consoles) = c.hello_for(&net).ok_or_else(|| anyhow!("unknown network"))?;
+    let (mut send, mut recv) = conn.open_bi().await.ctx("open session")?;
+    proto::write_frame(&mut send, &Req::Hello { cert, consoles }).await?;
+    let resp: Resp = tokio::time::timeout(Duration::from_secs(20), proto::read_frame(&mut recv))
+        .await
+        .map_err(|_| anyhow!("no answer to hello"))??;
+    let (node_name, inventory) = match resp {
+        Resp::Welcome { node_name, inventory } => (node_name, inventory),
+        Resp::Error { message } => bail!("{message}"),
+        _ => bail!("unexpected answer to hello"),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+    c.on_online(&node, &net, conn.clone(), tx.clone(), node_name, inventory);
+
+    tokio::spawn(async move {
+        while let Some(f) = rx.recv().await {
+            if proto::write_frame(&mut send, &f).await.is_err() {
+                break;
+            }
+        }
+    });
+    let last = Arc::new(AtomicU64::new(now()));
+    {
+        let (c, conn, last, node) = (c.clone(), conn.clone(), last.clone(), node.clone());
+        tokio::spawn(async move {
+            while let Ok(f) = proto::read_frame::<_, Frame>(&mut recv).await {
+                last.store(now(), Ordering::Relaxed);
+                if let Frame::Inventory { inventory } = f {
+                    c.on_inventory(&node, inventory);
+                }
+            }
+            conn.close(0u32.into(), b"session ended");
+            c.on_offline(&node, &conn);
+        });
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PING_EVERY).await;
+            if tx.send(Frame::Ping).is_err() {
+                break;
+            }
+            if now().saturating_sub(last.load(Ordering::Relaxed)) > PONG_TIMEOUT_SECS {
+                conn.close(0u32.into(), b"no pong");
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Dial a node and open a session, unless one exists or is being opened.
+async fn dial(c: Arc<Console>, net: String, node: String) -> Result<()> {
+    if c.live.lock().unwrap().contains_key(&node) || !c.dialing.lock().unwrap().insert(node.clone()) {
+        return Ok(());
+    }
+    let r = async {
+        let peer: PublicKey = node.parse().ctx("node id")?;
+        let conn = Arc::new(proto::connect(c.endpoint(), peer).await?);
+        start_session(c.clone(), conn, net, node.clone()).await
+    }
+    .await;
+    c.dialing.lock().unwrap().remove(&node);
+    r
+}
+
+/// A live connection to `node`, dialing it now if needed.
+async fn ensure_live(c: &Arc<Console>, net: &str, node: &str) -> Result<Arc<Connection>> {
+    if let Some(conn) = c.live_conn(node) {
+        return Ok(conn);
+    }
+    let r = dial(c.clone(), net.to_string(), node.to_string()).await;
+    let t = Instant::now();
+    while t.elapsed() < proto::DIAL_TIMEOUT + Duration::from_secs(5) {
+        if let Some(conn) = c.live_conn(node) {
+            return Ok(conn);
+        }
+        if !c.dialing.lock().unwrap().contains(node) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    r?;
+    c.live_conn(node).ok_or_else(|| anyhow!("machine offline"))
+}
+
+/// Opens sessions to nodes that have none: right away at start, quickly after a drop, rarely otherwise.
+async fn manager(c: Arc<Console>) {
+    loop {
+        for (net, node, last_seen) in c.known_nodes() {
+            if c.live.lock().unwrap().contains_key(&node) || c.dialing.lock().unwrap().contains(&node) {
+                continue;
+            }
+            let due = c.retry.lock().unwrap().get(&node).copied();
+            if due.is_some_and(|(next, _)| Instant::now() < next) {
+                continue;
+            }
+            let prev = due.map(|(_, b)| b);
+            let c2 = c.clone();
+            tokio::spawn(async move {
+                if dial(c2.clone(), net, node.clone()).await.is_err() {
+                    let recent = now().saturating_sub(last_seen) < RECENT;
+                    let backoff = match (recent, prev) {
+                        (true, Some(b)) => (b * 2).min(Duration::from_secs(60)),
+                        (true, None) => Duration::from_secs(3),
+                        (false, _) => SWEEP_EVERY,
+                    };
+                    c2.retry.lock().unwrap().insert(node, (Instant::now() + backoff, backoff));
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// A connection some peer opened to this console.
+async fn incoming(c: Arc<Console>, conn: Arc<Connection>) {
+    let peer = conn.remote_id();
+    let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(Duration::from_secs(30), conn.accept_bi()).await else { return };
+    let Ok(req) = proto::read_frame::<_, Req>(&mut recv).await else { return };
+    let answer = match req {
+        Req::Knock { network, cert, join, inventory } => match c.knock(&peer, &network, cert, join, inventory) {
+            Ok(admission) => {
+                if proto::write_frame(&mut send, &Resp::Knocked { admission }).await.is_err() {
+                    return;
+                }
+                let _ = send.finish();
+                match start_session(c.clone(), conn.clone(), network, peer.to_string()).await {
+                    // Keep this task (and the connection) alive while the session lasts.
+                    Ok(()) => {
+                        conn.closed().await;
+                    }
+                    Err(e) => clog(&format!("session with {} failed: {e:#}", peer.fmt_short())),
+                }
+                return;
+            }
+            Err(e) => Resp::Error { message: format!("{e:#}") },
+        },
+        Req::Sync { cert, nodes, consoles, removed } => {
+            c.sync_answer(&peer, &cert, nodes, consoles, removed).unwrap_or_else(|e| Resp::Error { message: format!("{e:#}") })
+        }
+        _ => Resp::Error { message: "not allowed".into() },
+    };
+    if proto::write_frame(&mut send, &answer).await.is_ok() {
+        let _ = send.finish();
+        // The dialer closes once it has the answer.
+        let _ = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
+    }
+}
+
+/// Accept loop of a local HTTP listener. A plain fn with a boxed future: `handle` can restart the API
+/// listener, and a direct async recursion would make the future type infinite.
+fn spawn_http(c: Arc<Console>, listener: TcpListener) -> tokio::task::JoinHandle<()> {
+    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(async move {
+        loop {
+            if let Ok((sock, _)) = listener.accept().await {
+                tokio::spawn(http_conn(c.clone(), sock));
+            }
+        }
+    });
+    tokio::spawn(fut)
+}
+
+/// (Re)start the API listener on its fixed port, if enabled.
+async fn start_api(c: &Arc<Console>) {
+    if let Some(t) = c.api_task.lock().unwrap().take() {
+        t.abort();
+    }
+    let (enabled, port) = {
+        let st = c.state.lock().unwrap();
+        (st.api.enabled, st.api.port)
+    };
+    if !enabled || !c.open {
+        return;
+    }
+    match TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(l) => {
+            *c.api_task.lock().unwrap() = Some(spawn_http(c.clone(), l));
+            clog(&format!("API on http://127.0.0.1:{port}/v1"));
+        }
+        Err(e) => clog(&format!("API port {port} not available: {e}")),
+    }
+}
+
+enum Caller {
+    /// The local CLI / GUI (internal token).
+    Local,
+    /// A program with an API token of this scope.
+    Token(String),
+}
+
+fn caller(c: &Console, token: Option<&str>) -> Option<Caller> {
+    let token = token?;
+    if c.internal_token.get().is_some_and(|t| eq_ct(t, token)) {
+        return Some(Caller::Local);
+    }
+    let st = c.state.lock().unwrap();
+    if !st.api.enabled {
+        return None;
+    }
+    st.api.tokens.iter().find(|t| eq_ct(&t.token, token)).map(|t| Caller::Token(t.scope.clone()))
+}
+
+/// Routes: `POST /v1/op` (body: an operation as JSON, e.g. `{"op":"nodes"}`), and for convenience
+/// `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`.
+async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
+    let (r, mut w) = sock.into_split();
+    let Ok(req) = crate::http::read_request(r).await else {
+        let _ = crate::http::write_response(&mut w, 400, &json!({ "ok": false, "error": "bad request" })).await;
+        return;
+    };
+    let Some(who) = caller(&c, req.token.as_deref()) else {
+        let _ = crate::http::write_response(&mut w, 401, &json!({ "ok": false, "error": "missing or unknown token" })).await;
+        return;
+    };
+    let op: Result<IpcOp, u16> = match (req.method.as_str(), req.path.trim_end_matches('/')) {
+        ("POST", "/v1/op") => serde_json::from_slice(&req.body).map_err(|_| 400),
+        ("GET", "/v1/status") => Ok(IpcOp::Status),
+        ("GET", "/v1/nodes") => Ok(IpcOp::Nodes { network: None }),
+        ("GET", p) if p.starts_with("/v1/nodes/") => Ok(IpcOp::Info { node: p["/v1/nodes/".len()..].to_string() }),
+        _ => Err(404),
+    };
+    let op = match op {
+        Ok(op) => op,
+        Err(code) => {
+            let _ = crate::http::write_response(&mut w, code, &json!({ "ok": false, "error": if code == 404 { "no such route" } else { "bad operation" } })).await;
+            return;
+        }
+    };
+    if let Caller::Token(scope) = &who {
+        let allowed = match op.scope() {
+            Some("read") => scope == "read" || scope == "admin",
+            Some("admin") => scope == "admin",
+            _ => false,
+        };
+        if !allowed {
+            let _ = crate::http::write_response(&mut w, 403, &json!({ "ok": false, "error": "this token's scope does not allow that" })).await;
+            return;
+        }
+    }
+    let body = match handle(&c, op).await {
+        Ok(v) => json!({ "ok": true, "data": v }),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+    };
+    let _ = crate::http::write_response(&mut w, 200, &body).await;
+}
+
+fn api_json(api: &ApiConfig) -> Value {
+    json!({
+        "enabled": api.enabled,
+        "port": api.port,
+        "url": format!("http://127.0.0.1:{}/v1", api.port),
+        "tokens": api.tokens.iter().map(|t| json!({ "name": t.name, "scope": t.scope, "created": t.created })).collect::<Vec<_>>(),
+    })
+}
+
+fn find_node(c: &Console, target: &str) -> Result<(String, String, String)> {
+    let st = c.state.lock().unwrap();
+    let (node, net) = match target.rsplit_once('.') {
+        Some((a, b)) if st.networks.iter().any(|n| n.name == b) => (a, Some(b)),
+        _ => (target, None),
+    };
+    let mut hits = vec![];
+    for n in &st.networks {
+        if net.is_some_and(|w| w != n.name) {
+            continue;
+        }
+        for x in n.nodes.iter().filter(|x| !n.removed.contains(&x.id)) {
+            if x.name == node || (node.len() >= 8 && x.id.starts_with(node)) {
+                hits.push((n.id.clone(), n.name.clone(), x.id.clone()));
+            }
+        }
+    }
+    match hits.len() {
+        0 => Err(anyhow!("no machine {target} (see `gangli nodes`)")),
+        1 => Ok(hits.remove(0)),
+        _ => Err(anyhow!("{target} is in more than one network: use name.network")),
+    }
+}
+
+fn node_views(c: &Console, network: Option<&str>) -> Vec<NodeView> {
+    let st = c.state.lock().unwrap();
+    let live = c.live.lock().unwrap();
+    let mut out = vec![];
+    for n in &st.networks {
+        if network.is_some_and(|w| w != n.name) {
+            continue;
+        }
+        for x in n.nodes.iter().filter(|x| !n.removed.contains(&x.id)) {
+            let l = live.get(&x.id);
+            out.push(NodeView {
+                network: n.name.clone(),
+                id: x.id.clone(),
+                name: x.name.clone(),
+                online: l.is_some(),
+                since: l.map(|l| l.since),
+                last_seen: x.last_seen,
+                path: l.and_then(|l| proto::path_info(&l.conn)),
+                inventory: x.inventory.clone(),
+            });
+        }
+    }
+    out.sort_by(|a, b| (b.online, &a.network, &a.name).cmp(&(a.online, &b.network, &b.name)));
+    out
+}
+
+fn codes_json(name: &str, key: &SecretKey) -> Value {
+    json!({
+        "network": name,
+        "id": key.public().to_string(),
+        "public_code": code::public_code(key),
+        "private_code": code::private_code(key),
+    })
+}
+
+fn add_network(c: &Console, key: SecretKey, name: Option<String>) -> Result<String> {
+    let id = key.public().to_string();
+    let host = slug(&crate::inventory::collect().hostname);
+    let me = c.me.to_string();
+    let mut st = c.state.lock().unwrap();
+    if let Some(n) = st.networks.iter().find(|n| n.id == id) {
+        return Ok(n.name.clone());
+    }
+    let name = unique_name(&name.unwrap_or_else(|| "net".into()), st.networks.iter().map(|n| n.name.as_str()));
+    st.networks.push(ConsoleNet {
+        id,
+        name: name.clone(),
+        key: store::secret_to_hex(&key),
+        cert: Cert::issue(&key, &me, CertKind::Console, &host, TEN_YEARS),
+        nodes: vec![],
+        consoles: vec![ConsoleRec { id: me, name: host, seen: now() }],
+        removed: vec![],
+    });
+    Ok(name)
+}
+
+/// One operation, from the IPC (open console) or from a one-shot CLI console.
+pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
+    match op {
+        IpcOp::Status => {
+            let st = c.state.lock().unwrap();
+            let live = c.live.lock().unwrap();
+            let nets: Vec<Value> = st
+                .networks
+                .iter()
+                .map(|n| {
+                    json!({
+                        "name": n.name,
+                        "id": n.id,
+                        "nodes": n.nodes.iter().filter(|x| !n.removed.contains(&x.id)).count(),
+                        "online": n.nodes.iter().filter(|x| live.contains_key(&x.id)).count(),
+                        "consoles": n.consoles.len(),
+                    })
+                })
+                .collect();
+            Ok(json!({ "version": crate::build_version(), "console_id": c.me.to_string(), "open": c.open, "networks": nets }))
+        }
+        IpcOp::NetworkCreate { name } => {
+            let key = SecretKey::generate();
+            let name = add_network(c, key.clone(), Some(slug(&name)))?;
+            c.save();
+            clog(&format!("network {name} created"));
+            refresh_network(c, &key.public().to_string(), true).await;
+            Ok(codes_json(&name, &key))
+        }
+        IpcOp::NetworkAdd { code: s, name } => {
+            let Code::Private { key } = code::decode(&s)? else {
+                bail!("this is a public code: it is for the machines to manage (`gangli node --code`), a console needs the private one");
+            };
+            let net = key.public().to_string();
+            // The directory may carry the network's name.
+            let dir_name = directory::resolve(&key.public(), Some(&key)).await.ok().map(|d| d.name).filter(|n| !n.is_empty());
+            let name = add_network(c, key, name.or(dir_name))?;
+            c.save();
+            clog(&format!("network {name} added"));
+            refresh_network(c, &net, true).await;
+            let count = c.state.lock().unwrap().networks.iter().find(|n| n.id == net).map(|n| n.nodes.len()).unwrap_or(0);
+            Ok(json!({ "network": name, "id": net, "machines": count }))
+        }
+        IpcOp::NetworkCodes { name } => {
+            let st = c.state.lock().unwrap();
+            let n = st.networks.iter().find(|n| n.name == name).ok_or_else(|| anyhow!("no network {name} here"))?;
+            Ok(codes_json(&n.name, &store::secret_from_hex(&n.key)?))
+        }
+        IpcOp::NetworkRemove { name } => {
+            let ids: Vec<String> = {
+                let mut st = c.state.lock().unwrap();
+                let Some(i) = st.networks.iter().position(|n| n.name == name) else { bail!("no network {name} here") };
+                let n = st.networks.remove(i);
+                n.nodes.into_iter().map(|x| x.id).collect()
+            };
+            for id in ids {
+                if let Some(conn) = c.live_conn(&id) {
+                    conn.close(0u32.into(), b"network removed from this console");
+                }
+            }
+            c.save();
+            Ok(json!({ "removed": name }))
+        }
+        IpcOp::Nodes { network } => {
+            if !c.open {
+                one_shot_round(c).await;
+            } else {
+                // Right after the console opened, give the first round of sessions a moment.
+                while c.started.elapsed() < Duration::from_secs(5) && !c.dialing.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            }
+            Ok(serde_json::to_value(node_views(c, network.as_deref()))?)
+        }
+        IpcOp::Info { node } => {
+            let (net_id, net_name, node_id) = find_node(c, &node)?;
+            let conn = ensure_live(c, &net_id, &node_id).await?;
+            let Resp::Info { node_name, inventory } = proto::request(&conn, &Req::Info).await? else {
+                bail!("unexpected answer");
+            };
+            Ok(json!({ "network": net_name, "node": node_name, "id": node_id, "path": proto::path_info(&conn), "inventory": inventory }))
+        }
+        IpcOp::Forget { node } => {
+            let (net_id, _, node_id) = find_node(c, &node)?;
+            {
+                let mut st = c.state.lock().unwrap();
+                if let Some(n) = st.networks.iter_mut().find(|n| n.id == net_id) {
+                    n.nodes.retain(|x| x.id != node_id);
+                    if !n.removed.contains(&node_id) {
+                        n.removed.push(node_id.clone());
+                    }
+                }
+            }
+            c.save();
+            if let Some(conn) = c.live_conn(&node_id) {
+                conn.close(0u32.into(), b"removed");
+            }
+            if !c.open {
+                refresh_network(c, &net_id, true).await;
+            }
+            Ok(json!({ "forgot": node }))
+        }
+        IpcOp::ApiStatus => Ok(api_json(&c.state.lock().unwrap().api)),
+        IpcOp::ApiEnable { port } => {
+            {
+                let mut st = c.state.lock().unwrap();
+                st.api.enabled = true;
+                if let Some(p) = port {
+                    st.api.port = p;
+                }
+            }
+            c.save();
+            start_api(c).await;
+            Ok(api_json(&c.state.lock().unwrap().api))
+        }
+        IpcOp::ApiDisable => {
+            c.state.lock().unwrap().api.enabled = false;
+            c.save();
+            start_api(c).await;
+            Ok(api_json(&c.state.lock().unwrap().api))
+        }
+        IpcOp::ApiTokenAdd { name, scope } => {
+            if scope != "read" && scope != "admin" {
+                bail!("scope must be read or admin");
+            }
+            let token = format!("gat_{}", HEXLOWER.encode(&random16()));
+            let api = {
+                let mut st = c.state.lock().unwrap();
+                st.api.tokens.retain(|t| t.name != name);
+                st.api.tokens.push(ApiToken { name: name.clone(), scope: scope.clone(), token: token.clone(), created: now() });
+                st.api.clone()
+            };
+            c.save();
+            Ok(json!({ "name": name, "scope": scope, "token": token, "url": format!("http://127.0.0.1:{}/v1", api.port), "enabled": api.enabled }))
+        }
+        IpcOp::ApiTokenRemove { name } => {
+            let removed = {
+                let mut st = c.state.lock().unwrap();
+                let before = st.api.tokens.len();
+                st.api.tokens.retain(|t| t.name != name);
+                before - st.api.tokens.len()
+            };
+            if removed == 0 {
+                bail!("no token named {name}");
+            }
+            c.save();
+            Ok(json!({ "removed": name }))
+        }
+        IpcOp::Stop => {
+            c.stop.notify_one();
+            Ok(json!({ "stopping": true }))
+        }
+    }
+}
+
+/// One-shot console: read the directories and dial every known machine in parallel, for a few seconds.
+async fn one_shot_round(c: &Arc<Console>) {
+    let nets: Vec<String> = c.state.lock().unwrap().networks.iter().map(|n| n.id.clone()).collect();
+    let mut dirs = vec![];
+    for net in nets {
+        let c2 = c.clone();
+        dirs.push(tokio::spawn(async move { refresh_network(&c2, &net, false).await }));
+    }
+    let dial_all = |c: &Arc<Console>| {
+        c.known_nodes()
+            .into_iter()
+            .map(|(net, node, _)| {
+                let c2 = c.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(ONE_SHOT_WAIT, dial(c2, net, node)).await;
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = dial_all(c);
+    let _ = tokio::time::timeout(ONE_SHOT_WAIT, async {
+        for d in dirs {
+            let _ = d.await;
+        }
+    })
+    .await;
+    // Machines learned from the directory or another console.
+    let second = dial_all(c);
+    for t in first.into_iter().chain(second) {
+        let _ = t.await;
+    }
+}
+
+/// `gangli console run`: an open console in the foreground, until `console stop` or the process ends.
+pub fn run_foreground() -> Result<()> {
+    let Some(lock) = try_lock()? else {
+        bail!("a gangli console is already open for this user");
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let r = rt.block_on(async {
+        let c = start(true).await?;
+        eprintln!("console open (id {}); stop with `gangli console stop`", c.me);
+        c.stop.notified().await;
+        c.shutdown().await;
+        Ok(())
+    });
+    drop(lock);
+    r
+}
+
+/// A CLI command with no open console: run it in a one-shot console in this process.
+pub fn run_once(op: IpcOp) -> Result<Value> {
+    let Some(lock) = try_lock()? else {
+        bail!("a console is starting for this user; try again in a moment");
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let r = rt.block_on(async {
+        let c = start(false).await?;
+        let r = handle(&c, op).await;
+        c.shutdown().await;
+        r
+    });
+    drop(lock);
+    r
+}

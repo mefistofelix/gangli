@@ -36,6 +36,31 @@ pub struct DiskInfo {
     pub avail: u64,
 }
 
+impl Inventory {
+    /// The part that changes rarely (not free memory, free disk, uptime). A node pushes its inventory to
+    /// the consoles only when this changes, so an idle node sends nothing.
+    pub fn fingerprint(&self) -> String {
+        let disks: Vec<(&str, u64)> = self.disks.iter().map(|d| (d.mount.as_str(), d.total)).collect();
+        serde_json::json!([
+            self.hostname, self.os, self.os_version, self.kernel, self.arch, self.cpus, self.cpu,
+            self.mem_total, disks, self.ips, self.users, self.service_user, self.full_access, self.version
+        ])
+        .to_string()
+    }
+
+    /// "Windows 11 Home", "Ubuntu 24.04 LTS", "macOS 15.1": the OS name without repeating it.
+    pub fn os_label(&self) -> String {
+        let v = self.os_version.trim();
+        if v.is_empty() {
+            self.os.clone()
+        } else if v.to_lowercase().contains(&self.os.to_lowercase()) || self.os.is_empty() {
+            v.to_string()
+        } else {
+            format!("{} {v}", self.os)
+        }
+    }
+}
+
 /// sysinfo returns `Result` or `Option` depending on the function and version; accept both.
 trait Lenient<T> {
     fn lenient(self) -> T;

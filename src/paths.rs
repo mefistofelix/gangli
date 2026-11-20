@@ -1,81 +1,60 @@
-//! Fixed locations per OS. The service state (keys, networks, certificates) is owner-only: root / SYSTEM /
-//! Administrators (section 9 of docs/ARCHITECTURE.md). The client state lives in the user's config dir.
+//! gangli is portable **[decided 2026-11-20]**: everything it keeps lives next to the executable, in
+//! `gangli-data/`, never in system or user folders:
 //!
-//! Development / test override: `GANGLI_STATE_DIR` points the service state elsewhere and makes the state
-//! commands run without elevation (a user-level instance, e.g. two agents and a master on one PC);
-//! `GANGLI_CLIENT_DIR` does the same for the client.
+//! ```text
+//! gangli(.exe)
+//! gangli-data/
+//!   node/      node key, memberships, node.log         (admin-only once the service is installed)
+//!   console/   console key, networks, API, console.log (the user's)
+//! ```
+//!
+//! The only things outside are what the OS itself requires to register a service (SCM entry, systemd unit,
+//! LaunchDaemon plist), added by `install` and removed by `uninstall`.
+//!
+//! Tests / development: `GANGLI_DATA_DIR` replaces `gangli-data/` (one per simulated machine).
 
 use std::path::PathBuf;
 
-/// Where the service binary is copied to on `install`.
-pub fn install_bin() -> PathBuf {
-    #[cfg(windows)]
-    {
-        let pf = std::env::var_os("ProgramFiles")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-        pf.join("gangli").join("gangli.exe")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/usr/local/bin/gangli")
-    }
+/// The folder of the running executable.
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn dev_state_override() -> Option<PathBuf> {
-    std::env::var_os("GANGLI_STATE_DIR").filter(|v| !v.is_empty()).map(PathBuf::from)
+pub fn dev_override() -> Option<PathBuf> {
+    std::env::var_os("GANGLI_DATA_DIR").filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
-/// Directory for keys, networks and certificates. Owned by the service account, not world-readable.
-pub fn state_dir() -> PathBuf {
-    if let Some(p) = dev_state_override() {
-        return p;
-    }
-    #[cfg(windows)]
-    {
-        let pd = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-        pd.join("gangli")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from("/Library/Application Support/gangli")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        PathBuf::from("/var/lib/gangli")
-    }
+pub fn data_dir() -> PathBuf {
+    dev_override().unwrap_or_else(|| exe_dir().join("gangli-data"))
 }
 
-/// The client's own state, per user.
-pub fn client_dir() -> PathBuf {
-    if let Some(p) = std::env::var_os("GANGLI_CLIENT_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(p);
-    }
-    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(windows)]
-    {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join("AppData").join("Roaming"))
-            .join("gangli")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        home().join("Library").join("Application Support").join("gangli")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config"))
-            .join("gangli")
-    }
+pub fn node_dir() -> PathBuf {
+    data_dir().join("node")
+}
+
+pub fn console_dir() -> PathBuf {
+    data_dir().join("console")
+}
+
+/// Marker written by `install`: the node of this folder runs as the system service.
+pub fn service_marker() -> PathBuf {
+    node_dir().join("service")
+}
+
+pub fn service_installed() -> bool {
+    service_marker().exists()
+}
+
+/// True when the node state belongs to the installed service and this process is not elevated.
+pub fn node_needs_admin() -> bool {
+    service_installed() && !crate::elevate::is_root()
 }
 
 /// Human name of the service as it appears to the OS.
 pub const SERVICE_NAME: &str = "gangli";
 pub const SERVICE_DISPLAY: &str = "gangli remote management";
-/// launchd / reverse-dns label (macOS) and systemd unit base name.
+/// launchd label (macOS).
 pub const SERVICE_LABEL: &str = "com.mefistofelix.gangli";

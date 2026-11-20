@@ -14,14 +14,11 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::paths::{install_bin, SERVICE_DISPLAY, SERVICE_NAME};
+use crate::paths::{SERVICE_DISPLAY, SERVICE_NAME};
 
 pub fn install(join: Option<&str>) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = install_bin();
-    super::copy_self_to(&bin)?;
-    super::secure_dir_io()?;
-    super::record_join(join)?;
+    let bin = super::prepare_install(join)?;
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
         .map_err(to_io)?;
@@ -59,9 +56,8 @@ pub fn uninstall() -> io::Result<()> {
         std::thread::sleep(Duration::from_secs(2));
         service.delete().map_err(to_io)?;
     }
-    let _ = std::fs::remove_dir_all(crate::paths::state_dir());
-    let _ = std::fs::remove_file(install_bin());
-    println!("removed the gangli service");
+    super::finish_uninstall()?;
+    println!("removed the gangli service; the node keeps its identity in gangli-data\node (delete the folder to remove everything)");
     Ok(())
 }
 

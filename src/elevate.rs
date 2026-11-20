@@ -17,9 +17,10 @@ pub fn ensure_root() -> std::io::Result<()> {
     relaunch_elevated()
 }
 
-/// Like [`ensure_root`], except in development mode (`GANGLI_STATE_DIR`), where the state is the user's own.
+/// For node state commands: elevate only when the node state is the system one (service installed).
+/// A node run by hand keeps its state in the user's folder and never asks.
 pub fn ensure_admin() -> std::io::Result<()> {
-    if crate::paths::dev_state_override().is_some() {
+    if !crate::paths::node_needs_admin() {
         return Ok(());
     }
     ensure_root()
@@ -50,10 +51,23 @@ pub fn is_root() -> bool {
     }
 }
 
-#[cfg(unix)]
+/// Effective uid 0, from `/proc/self/status` (no libc binding needed).
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn is_root() -> bool {
-    // geteuid never fails and takes no arguments.
-    unsafe { libc::geteuid() == 0 }
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).map(|l| l.split_whitespace().nth(2) == Some("0")))
+        .unwrap_or(false)
+}
+
+/// Effective uid 0: the owner of a file this process creates (macOS has no /proc).
+#[cfg(target_os = "macos")]
+pub fn is_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::env::temp_dir().join(format!(".gangli-uid-{}", std::process::id()));
+    let uid = std::fs::write(&p, b"").and_then(|_| std::fs::metadata(&p)).map(|m| m.uid()).ok();
+    let _ = std::fs::remove_file(&p);
+    uid == Some(0)
 }
 
 /// Quote one argument for a Windows command line (CommandLineToArgvW rules).
@@ -93,7 +107,8 @@ fn relaunch_elevated() -> std::io::Result<()> {
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let exe = std::env::current_exe()?;
-    let out = std::env::temp_dir().join(format!("gangli-elevated-{}.txt", std::process::id()));
+    // Portable: the relay file lives next to the binary too (the elevated copy can always write there).
+    let out = crate::paths::data_dir().join(format!("elevated-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&out);
     let mut params = format!("--elevated-output {}", win_quote(&out.to_string_lossy()));
     for a in std::env::args().skip(1) {
@@ -145,6 +160,9 @@ pub fn adopt_elevated_output(args: &mut Vec<std::ffi::OsString>) {
     }
     let path = args.remove(2);
     args.remove(1);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(f) = std::fs::File::create(&path) {
         let h = f.into_raw_handle();
         unsafe {

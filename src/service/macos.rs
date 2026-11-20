@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 use std::process::Command;
 
-use crate::paths::{install_bin, SERVICE_LABEL};
+use crate::paths::SERVICE_LABEL;
 
 fn plist_path() -> String {
     format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist")
@@ -11,10 +11,7 @@ fn plist_path() -> String {
 
 pub fn install(join: Option<&str>) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = install_bin();
-    super::copy_self_to(&bin)?;
-    super::secure_dir_io()?;
-    super::record_join(join)?;
+    let bin = super::prepare_install(join)?;
 
     let plist = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -60,9 +57,8 @@ pub fn uninstall() -> io::Result<()> {
         .status();
     let _ = Command::new("launchctl").args(["unload", "-w", &path]).status();
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir_all(crate::paths::state_dir());
-    let _ = std::fs::remove_file(install_bin());
-    println!("removed the gangli service");
+    super::finish_uninstall()?;
+    println!("removed the gangli service; the node keeps its identity in gangli-data/node (delete the folder to remove everything)");
     Ok(())
 }
 

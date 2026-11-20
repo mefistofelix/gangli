@@ -40,6 +40,8 @@ done
 [ "$FAIL" = 0 ] || exit 1
 mkdir -p out/release; rm -f out/release/*
 for OS in $ONLY; do cp out/box-$OS/gangli-* out/release/; done
+# keep the lock file the build resolved (same on every OS for the same tree)
+for OS in $ONLY; do [ -f out/box-$OS/Cargo.lock ] && cp out/box-$OS/Cargo.lock Cargo.lock && break; done
 (cd out/release && sha256sum gangli-* > SHA256SUMS)
 ls -la out/release
 [ "$RELEASE" = 1 ] || exit 0
