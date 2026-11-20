@@ -9,9 +9,10 @@ fn plist_path() -> String {
     format!("/Library/LaunchDaemons/{SERVICE_LABEL}.plist")
 }
 
-pub fn install(join: Option<&str>) -> io::Result<()> {
+pub fn install(o: &super::InstallOpts) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = super::prepare_install(join)?;
+    let bin = super::prepare_install(o)?;
+    let user_key = o.user.as_ref().map(|u| format!("\t<key>UserName</key>\n\t<string>{u}</string>\n")).unwrap_or_default();
 
     let plist = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -22,10 +23,12 @@ pub fn install(join: Option<&str>) -> io::Result<()> {
          \t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{bin}</string>\n\t\t<string>run</string>\n\t</array>\n\
          \t<key>RunAtLoad</key>\n\t<true/>\n\
          \t<key>KeepAlive</key>\n\t<true/>\n\
+         {user_key}\
          </dict>\n\
          </plist>\n",
         label = SERVICE_LABEL,
-        bin = bin.display()
+        bin = bin.display(),
+        user_key = user_key
     );
     let path = plist_path();
     let mut f = std::fs::File::create(&path)?;
@@ -58,7 +61,7 @@ pub fn uninstall() -> io::Result<()> {
     let _ = Command::new("launchctl").args(["unload", "-w", &path]).status();
     let _ = std::fs::remove_file(&path);
     super::finish_uninstall()?;
-    println!("removed the gangli service; the node keeps its identity in gangli-data/node (delete the folder to remove everything)");
+    println!("removed the gangli service; the node keeps its identity in gangli.node (delete the folder to remove everything)");
     Ok(())
 }
 

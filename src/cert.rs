@@ -32,8 +32,9 @@ pub struct CertBody {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Cert {
-    pub body: CertBody,
+    // `sig` first: TOML wants plain values before tables.
     pub sig: String,
+    pub body: CertBody,
 }
 
 fn message(body: &CertBody) -> Vec<u8> {

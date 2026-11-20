@@ -82,6 +82,9 @@ pub enum Req {
     Sync { cert: Cert, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String> },
     Hello { cert: Cert, consoles: Vec<String> },
     Info,
+    /// Console → node: connect to `target` (the machine's LAN or localhost); after `Forwarding` the stream
+    /// carries the raw bytes both ways.
+    Forward { target: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -94,6 +97,7 @@ pub enum Resp {
     Synced { nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String> },
     Welcome { node_name: String, inventory: Inventory },
     Info { node_name: String, inventory: Inventory },
+    Forwarding,
     Error { message: String },
 }
 

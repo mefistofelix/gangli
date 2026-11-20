@@ -1,6 +1,6 @@
 //! CLI ↔ console. When a console is open (GUI / tray, or `gangli console run`), the CLI asks its local
-//! HTTP API on 127.0.0.1 with the internal token from `console.port` (in `gangli-data/console`, owner-only;
-//! a new token every time the console opens), and gets the live view at once. Otherwise the command runs in a one-shot console inside the CLI process.
+//! HTTP API on 127.0.0.1 (port and token in the `[console]` table of `gangli.console`, an owner-only file),
+//! and gets the live view at once. Otherwise the command runs in a one-shot console inside the CLI process.
 //! No background process is ever started.
 
 use std::net::{SocketAddr, TcpStream};
@@ -12,15 +12,6 @@ use serde_json::Value;
 
 use crate::inventory::Inventory;
 use crate::proto::PathInfo;
-
-pub const PORT_FILE: &str = "console.port";
-
-#[derive(Serialize, Deserialize)]
-pub struct PortFile {
-    pub port: u16,
-    pub token: String,
-    pub pid: u32,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -35,10 +26,14 @@ pub enum IpcOp {
     Forget { node: String },
     /// API for programs and LLM agents (token management: CLI / GUI only, never through an API token).
     ApiStatus,
-    ApiEnable { port: Option<u16> },
+    ApiEnable,
     ApiDisable,
     ApiTokenAdd { name: String, scope: String },
     ApiTokenRemove { name: String },
+    TunnelList,
+    TunnelAdd { name: String, node: String, target: String, listen: Option<String> },
+    TunnelRemove { name: String },
+    TunnelSet { name: String, enabled: bool },
     Stop,
 }
 
@@ -48,7 +43,9 @@ impl IpcOp {
         match self {
             IpcOp::Status | IpcOp::Nodes { .. } | IpcOp::Info { .. } => Some("read"),
             IpcOp::NetworkCreate { .. } | IpcOp::NetworkAdd { .. } | IpcOp::NetworkCodes { .. } | IpcOp::NetworkRemove { .. } | IpcOp::Forget { .. } => Some("admin"),
-            IpcOp::ApiStatus | IpcOp::ApiEnable { .. } | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop => None,
+            IpcOp::TunnelList => Some("read"),
+            IpcOp::TunnelAdd { .. } | IpcOp::TunnelRemove { .. } | IpcOp::TunnelSet { .. } => Some("admin"),
+            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop => None,
         }
     }
 }
@@ -70,20 +67,25 @@ pub struct NodeView {
     pub inventory: Option<Inventory>,
 }
 
-fn read_port_file() -> Option<PortFile> {
-    let p = crate::paths::console_dir().join(PORT_FILE);
-    serde_json::from_slice(&std::fs::read(p).ok()?).ok()
+/// Port and token of this folder's console.
+struct Local {
+    port: u16,
+    token: String,
 }
 
 /// The open console, if any.
-fn connect_open() -> Option<(TcpStream, PortFile)> {
-    let pf = read_port_file()?;
-    let addr: SocketAddr = ([127, 0, 0, 1], pf.port).into();
+fn connect_open() -> Option<(TcpStream, Local)> {
+    let st: crate::console::ConsoleState = crate::store::load(&crate::paths::console_file()).ok()?;
+    if st.console.token.is_empty() {
+        return None;
+    }
+    let addr: SocketAddr = ([127, 0, 0, 1], st.console.port).into();
     let s = TcpStream::connect_timeout(&addr, Duration::from_millis(800)).ok()?;
-    Some((s, pf))
+    Some((s, Local { port: st.console.port, token: st.console.token }))
 }
 
-fn ask(mut s: TcpStream, pf: PortFile, op: IpcOp) -> Result<Value> {
+fn ask(mut s: TcpStream, pf: Local, op: IpcOp) -> Result<Value> {
+    let _ = pf.port;
     s.set_read_timeout(Some(Duration::from_secs(120)))?;
     let v = crate::http::post_blocking(&mut s, "/v1/op", &pf.token, &serde_json::to_string(&op)?)?;
     if v["ok"].as_bool() == Some(true) {

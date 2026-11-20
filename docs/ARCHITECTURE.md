@@ -14,10 +14,18 @@ Decisions taken with the owner are marked **[decided]**. Things still to be veri
   service name, normal install path, uninstall command): it is a management tool, not malware.
 - Security of the owner's own devices and keys is the owner's responsibility **[decided]**; the software keeps
   keys in owner-only files and never prints them.
-- **Portable** **[decided]**: everything lives next to the executable in `gangli-data/` (node key and
-  memberships, console key, networks, API, logs), never in system or user folders. The only things written
+- **Portable** **[decided]**: everything lives next to the executable (two files, below), never in system or user folders. The only things written
   elsewhere are the OS's own service registration (SCM entry, systemd unit, LaunchDaemon plist) while the
   service is installed.
+- **Two files only** **[decided 2026-11-20]**, next to the binary, TOML:
+  - `gangli.node` — the node: its key, the networks it belongs to (public code, certificate, consoles),
+    service settings (installed, account);
+  - `gangli.console` — everything else: console key, networks with their private keys and machines, other
+    consoles, local port and token for the CLI, API and tokens, SSH gateway and login rules, launchers,
+    tunnels.
+  gangli rewrites them when its state changes (keeping a header that explains them; other comments are not
+  kept) and picks up hand edits within 2 seconds. Both hold secrets: owner-only files (admin-only for
+  `gangli.node` once the service is installed). Besides them only `gangli.log` (node log, size-capped).
 - UX first: double click, one elevation prompt, done. Reconnections are invisible.
 - The node list is always current without waiting, with as little traffic as possible on the managed
   machines (no polling) **[decided]**.
@@ -141,26 +149,101 @@ Three layers, each one independent:
 Also: zstd on bulk streams, interactive frames before bulk, `exec` jobs keep running and buffering their output
 while the console is away (`gangli job output <id>`).
 
-## 7. SSH and terminals
+## 7. SSH gateway, terminal, launchers, tunnels **[decided 2026-11-20]**
 
-- The node embeds an SSH server (**russh**) that listens on nothing: it is only reachable through a gangli
-  stream. Works on Windows without OpenSSH. SFTP subsystem (russh-sftp) for WinSCP / `scp`.
-- **PTY**: Unix `openpty`; Windows **ConPTY**, the native pseudo-console API (`CreatePseudoConsole`, Windows
-  10 1809+), called through `windows-sys`: no extra dependency. Needed only for interactive sessions;
-  `gangli exec` uses plain pipes.
-- Authentication already happened at the iroh layer (console certificate); inside the tunnel the SSH username
-  only selects the **OS user**. The host key is derived from the node key and the console writes `known_hosts`
-  itself: no prompts.
-- On the console, three ways:
-  - **`~/.ssh/config`** (`gangli ssh-config --write`): `Host nas.gangli` with `ProxyCommand gangli proxy %h`,
-    so `ssh root@nas.gangli` works from any OpenSSH and any agent tool;
-  - **local SSH gateway** on `127.0.0.1:2222`: `ssh -p 2222 'root@nas'@127.0.0.1`, one port for PuTTY / WinSCP;
-  - **per-node local port** (`gangli forward nas`) and the GUI button "Open PuTTY".
-- Which users: what the OS allows **[decided]**.
-  - Unix, service as root: any local user (setuid/setgid/initgroups, login shell). Shown as "full access".
-  - Windows, service as SYSTEM: SYSTEM shell; the logged-in user's session through its token
-    (`WTSQueryUserToken`); another user only with its password (`LogonUser`).
-  - Service as a normal user (no elevation possible): only that user.
+### Local SSH gateway (console side)
+
+The open console runs an SSH server (russh) on `127.0.0.1:2222` (configurable). Any SSH client — PuTTY,
+OpenSSH, WinSCP, VS Code Remote, an LLM's `ssh` — connects there. The host is always `127.0.0.1`, so **the
+username says where to go**:
+
+| Username | Means |
+|---|---|
+| `root@nas` | user `root` on machine `nas` |
+| `root+nas` | the same, for tools that refuse `@` in a username |
+| `nas` | the machine's default user (the `desktop` user if one is logged in, else the service account) |
+| `root@nas.home` | when two networks have a machine called `nas` |
+| `desktop@nonna-pc` | **placeholder**: whoever is using the machine's desktop now (Windows: the active console session, else any logged-in session; macOS: the console user; Linux: the active graphical session). No password needed on the machine: the node runs as SYSTEM / root and starts the session with that user's token / uid |
+| `system@nas` | the account the node service runs as (SYSTEM / root) |
+
+The machine name is the one the console shows (from the hostname, renameable in the console); an id prefix
+works too.
+
+**Password**: rules in `gangli.console`, the most specific match wins — (machine, user) > (machine, any user) >
+(any machine, user) > any. Each rule's password is generated when the rule is made and can be changed. One
+rule for everything exists from the first start; OpenSSH users can list public keys instead.
+
+```toml
+[ssh]
+listen = "127.0.0.1:2222"
+
+[[ssh.login]]                 # every machine, every user
+hosts = ["*"]
+users = ["*"]
+password = "q7vd-k2mx-9wfa"    # generated; change it if you like
+
+[[ssh.login]]                 # grandma's PC, only her desktop session
+hosts = ["nonna-pc"]
+users = ["desktop"]
+password = "nonna"
+keys = ["ssh-ed25519 AAAA… michele@laptop"]
+```
+
+CLI: `gangli ssh login list|add|set|remove`, `gangli ssh password <machine> [user]` (prints the password
+that applies). GUI: a table of rules, a "copy password" button on each machine.
+
+After the login the gateway opens a gangli stream to the node (there is **no SSH server on the nodes**):
+shell or command with a PTY (ConPTY on Windows, `openpty` via rustix on Linux / macOS) as the requested user,
+SFTP, and `direct-tcpip` / dynamic forwarding (`ssh -L`, `ssh -D`) into the machine's LAN.
+
+### Launchers (the per-machine drop-down)
+
+External programs, parametrized, started by the GUI drop-down on a machine or by `gangli open <machine>
+--with <launcher> [--user <user>]`:
+
+```toml
+[[launcher]]
+name = "PuTTY"
+command = "putty -ssh {login}@127.0.0.1 -P {port} -pw {password}"
+
+[[launcher]]
+name = "Terminal (OpenSSH)"
+command = "wt ssh -p {port} {login}@127.0.0.1"
+
+[[launcher]]
+name = "WinSCP"
+command = "winscp sftp://{login_url}:{password_url}@127.0.0.1:{port}/"
+```
+
+Placeholders: `{node}`, `{network}`, `{user}`, `{login}` (= `user@node`), `{login_url}` / `{password_url}`
+(URL-encoded), `{password}`, `{port}`. A first set for the current OS is written on first start.
+
+### Integrated terminal
+
+The GUI's terminal tab uses the same node-side session protocol directly (no SSH), and later the persistent,
+mosh-like terminal of section 6.
+
+### Saved tunnels
+
+```toml
+[[tunnel]]
+name = "router"
+node = "nas"                  # machine name (or name.network)
+listen = "127.0.0.1:8080"     # on this computer
+target = "192.168.1.1:80"     # as seen from the machine: its LAN, or localhost
+enabled = true
+```
+
+Enabled tunnels listen whenever a console is open (GUI / tray / `console run`) and reconnect by themselves:
+every new local connection dials the machine again if its session dropped (with resumable streams, phase 4,
+open connections survive drops too). CLI: `gangli tunnel add|remove|list|on|off`; GUI: a list with switches.
+
+### Which users a node can act as **[decided]**
+
+- Service as SYSTEM / root (default): any local user, and the `desktop` placeholder.
+- `gangli install --user NAME [--password …]` runs the service as that account instead: sessions only as
+  that user. (Windows needs the account's password for the service manager.)
+- Node run by hand (`gangli node`): only the user who runs it.
 
 ## 8. Their LAN
 
@@ -183,11 +266,12 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 - A node needs no install: `gangli node --code …` (or running a binary that carries the code) runs it as
   the user, access limited to that user, no elevation.
 - `gangli install [--code CODE]` registers the service on **the binary where it is** (no copy elsewhere),
-  same `gangli-data/node`, so the node keeps its identity: SCM service (Windows, LocalSystem), systemd unit
+  same `gangli.node`, so the node keeps its identity: SCM service (Windows, LocalSystem), systemd unit
   (Linux), LaunchDaemon (macOS). Because the service runs as SYSTEM / root, the folder must not be writable
   by ordinary users (anyone could swap the binary): install requires a folder of its own (e.g. `C:\gangli`,
-  `/opt/gangli`) and makes it writable by administrators only, `gangli-data/node` readable by them only,
-  `gangli-data/console` still the installing user's. `uninstall` gives the folder back and keeps the
+  `/opt/gangli`) and makes it writable by administrators only, `gangli.node` readable by them (and the
+  service account) only, `gangli.console` still the installing user's. `--user NAME` runs the service as
+  that account (Windows also `--password`). `uninstall` gives the folder back and keeps the
   identity (delete the folder to remove everything).
 - Elevation is requested by the binary itself, one prompt: Windows UAC (relaunch hidden, its output relayed
   into the same terminal), macOS `osascript … with administrator privileges`, Linux `pkexec` then `sudo`.
@@ -225,13 +309,13 @@ atomically, restart, and roll back if the new version does not come back healthy
   `tray-icon` on Windows / macOS, `ksni` (pure Rust D-Bus) on Linux: nothing linked to GTK, so the Linux
   binary stays a single file that loads the GUI libraries at runtime. Starting at login is an option the
   user turns on, not a service.
-- **Local API** **[decided]**: off by default, enabled from the GUI or `gangli api enable` (127.0.0.1, port 7373),
-  served while a console is open. Named tokens made and revoked from the GUI or `gangli api token add|remove`,
+- **Local API** **[decided]**: off by default, enabled from the GUI or `gangli api enable` (on the console's local port,
+  127.0.0.1:7373 by default, `[console] port`), served while a console is open. Named tokens made and revoked from the GUI or `gangli api token add|remove`,
   never through the API itself; scopes `read` (status, machines, details) and `admin` (also networks, removing
   machines), later `exec` / `connect`. Routes: `POST /v1/op` with an operation as JSON (`{"op":"nodes"}`),
   `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`; `Authorization: Bearer <token>`.
-- The CLI and GUI talk to the open console through the same local HTTP with an internal token (new at every
-  start, in `gangli-data/console/console.port`), so an LLM using the CLI needs no token at all.
+- The CLI and GUI talk to the open console through the same local HTTP with the console's own token (in
+  the owner-only `gangli.console`; the open console owns the port, which is also the single-instance guard), so an LLM using the CLI needs no token at all.
 - **CLI** mirrors the API: `nodes`, `info`, `exec`, `ssh`, `term`, `cp`, `forward`, `socks`, `job`, all with
   `--json` and stable exit codes (`gangli exec nas -- df -h`).
 

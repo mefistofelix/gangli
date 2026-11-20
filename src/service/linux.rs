@@ -10,9 +10,10 @@ fn unit_path() -> String {
     format!("/etc/systemd/system/{SERVICE_NAME}.service")
 }
 
-pub fn install(join: Option<&str>) -> io::Result<()> {
+pub fn install(o: &super::InstallOpts) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = super::prepare_install(join)?;
+    let bin = super::prepare_install(o)?;
+    let user_line = o.user.as_ref().map(|u| format!("User={u}\n")).unwrap_or_default();
 
     let unit = format!(
         "[Unit]\n\
@@ -24,13 +25,15 @@ pub fn install(join: Option<&str>) -> io::Result<()> {
          Type=simple\n\
          ExecStart=\"{bin}\" run\n\
          WorkingDirectory={dir}\n\
+         {user_line}\
          Restart=always\n\
          RestartSec=5\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
         bin = bin.display(),
-        dir = crate::paths::exe_dir().display()
+        dir = crate::paths::exe_dir().display(),
+        user_line = user_line
     );
     let mut f = std::fs::File::create(unit_path())?;
     f.write_all(unit.as_bytes())?;
@@ -48,7 +51,7 @@ pub fn uninstall() -> io::Result<()> {
     let _ = std::fs::remove_file(unit_path());
     let _ = Command::new("systemctl").arg("daemon-reload").status();
     super::finish_uninstall()?;
-    println!("removed the gangli service; the node keeps its identity in gangli-data/node (delete the folder to remove everything)");
+    println!("removed the gangli service; the node keeps its identity in gangli.node (delete the folder to remove everything)");
     Ok(())
 }
 

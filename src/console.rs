@@ -1,7 +1,8 @@
 //! The console (section 5 of docs/ARCHITECTURE.md): the owner's side, a user process, never a service.
 //! It lives inside whatever uses it:
 //! - **open** — the GUI / tray, or `gangli console run` in a terminal: keeps one live session per node, so
-//!   the node list is current without asking anybody, and serves the local IPC for the CLI;
+//!   the node list is current without asking anybody, serves the local HTTP API (CLI, GUI, programs) and
+//!   the saved tunnels;
 //! - **one-shot** — a CLI command when no console is open: connects, answers, exits.
 //!
 //! Every console holding a network's key (the private code) is an owner of it, with equal rights: it admits
@@ -11,15 +12,13 @@
 //! Idle cost per online node: a ping every 25 s. Offline nodes are retried quickly right after a drop, then
 //! only every 5 minutes as a safety net (their own knock is what normally brings them back).
 //!
-//! State: `console.key` and `console.json` in the user's client dir; one console process at a time per user
-//! (lock on `console.lock`).
+//! State: `gangli.console` next to the binary (TOML). The open console owns its local port: a second one
+//! cannot bind it, so there is no lock file.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Result};
 use data_encoding::HEXLOWER;
@@ -35,14 +34,15 @@ use crate::cert::{Cert, CertKind, TEN_YEARS};
 use crate::code::{self, Code};
 use crate::directory::{self, Directory};
 use crate::inventory::Inventory;
-use crate::ipc::{IpcOp, NodeView, PortFile, PORT_FILE};
+use crate::ipc::{IpcOp, NodeView};
 use crate::proto::{self, Admission, ConsoleRec, Frame, NodeRec, Req, Resp};
 use crate::store;
 use crate::util::{eq_ct, now, random16, slug, unique_name, Ctx};
 
-pub const FILE: &str = "console.json";
-pub const KEY_FILE: &str = "console.key";
-const LOCK_FILE: &str = "console.lock";
+const HEADER: &str = "gangli.console — your console: networks and their PRIVATE keys, machines, API, tunnels.
+Whoever has this file owns every machine of its networks: keep it private, never put it on a managed machine.
+gangli rewrites this file when its state changes (comments other than this header are not kept) and picks
+up edits by hand within 2 seconds while a console is open. See docs/ARCHITECTURE.md.";
 const PING_EVERY: Duration = Duration::from_secs(25);
 const PONG_TIMEOUT_SECS: u64 = 70;
 const SWEEP_EVERY: Duration = Duration::from_secs(300);
@@ -53,31 +53,46 @@ const ONE_SHOT_WAIT: Duration = Duration::from_secs(6);
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct ConsoleState {
     #[serde(default)]
-    pub networks: Vec<ConsoleNet>,
+    pub console: ConsoleConf,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default, rename = "tunnel")]
+    pub tunnels: Vec<Tunnel>,
+    #[serde(default, rename = "network")]
+    pub networks: Vec<ConsoleNet>,
 }
 
-/// The console's API for programs and LLM agents: off unless enabled (CLI or GUI), on a fixed local port,
-/// with named tokens. The local CLI / GUI use their own internal token and never need this.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ApiConfig {
+pub struct ConsoleConf {
+    /// This console's secret key (hex), made on first start.
     #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_api_port")]
+    pub key: String,
+    /// Local HTTP port (127.0.0.1) of the open console: CLI, GUI and, when enabled, the API.
+    #[serde(default = "default_port")]
     pub port: u16,
+    /// Token of the local CLI / GUI (made on first start).
     #[serde(default)]
-    pub tokens: Vec<ApiToken>,
+    pub token: String,
 }
 
-fn default_api_port() -> u16 {
+fn default_port() -> u16 {
     7373
 }
 
-impl Default for ApiConfig {
+impl Default for ConsoleConf {
     fn default() -> Self {
-        ApiConfig { enabled: false, port: default_api_port(), tokens: vec![] }
+        ConsoleConf { key: String::new(), port: default_port(), token: String::new() }
     }
+}
+
+/// The API for programs and LLM agents on the console's local port: off unless enabled (CLI or GUI), with
+/// named tokens. The local CLI / GUI use the console's own token and never need this.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ApiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, rename = "token")]
+    pub tokens: Vec<ApiToken>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -89,40 +104,47 @@ pub struct ApiToken {
     pub created: u64,
 }
 
+/// A saved tunnel: active whenever a console is open.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Tunnel {
+    pub name: String,
+    /// Machine name (or name.network).
+    pub node: String,
+    /// On this computer, e.g. `127.0.0.1:8080`.
+    pub listen: String,
+    /// As seen from the machine: its LAN or localhost, e.g. `192.168.1.1:80`.
+    pub target: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ConsoleNet {
     pub id: String,
     pub name: String,
     /// The network key (hex): what makes this console an owner.
     pub key: String,
-    /// This console's certificate in the network (signed with the key above).
-    pub cert: Cert,
-    #[serde(default)]
-    pub nodes: Vec<NodeRec>,
-    #[serde(default)]
-    pub consoles: Vec<ConsoleRec>,
-    /// Nodes removed with `forget`: their knocks are refused.
+    /// Machines removed with `forget`: their knocks are refused.
     #[serde(default)]
     pub removed: Vec<String>,
+    /// This console's certificate in the network (signed with the key above).
+    pub cert: Cert,
+    #[serde(default, rename = "console")]
+    pub consoles: Vec<ConsoleRec>,
+    #[serde(default, rename = "node")]
+    pub nodes: Vec<NodeRec>,
 }
 
-fn dir() -> PathBuf {
-    crate::paths::console_dir()
+fn path() -> std::path::PathBuf {
+    crate::paths::console_file()
 }
 
 pub(crate) fn clog(msg: &str) {
-    use std::io::Write;
-    let line = format!("{} {msg}", now());
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(dir().join("console.log")) {
-        let _ = writeln!(f, "{line}");
-    }
-}
-
-/// Hold the per-user console lock, or `None` when another console process has it.
-pub fn try_lock() -> Result<Option<File>> {
-    store::ensure_dir(&dir())?;
-    let f = OpenOptions::new().create(true).truncate(false).write(true).open(dir().join(LOCK_FILE))?;
-    Ok(f.try_lock().is_ok().then_some(f))
+    crate::log_to_file(&format!("console: {msg}"));
 }
 
 struct Live {
@@ -144,8 +166,10 @@ pub struct Console {
     published: Mutex<HashMap<String, Directory>>,
     started: Instant,
     pub stop: Notify,
-    internal_token: OnceLock<String>,
-    api_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Modification time of `gangli.console` after our last write (to notice hand edits).
+    saved_at: Mutex<Option<SystemTime>>,
+    /// Running tunnels: name → (definition, listener task).
+    tunnels: Mutex<HashMap<String, (Tunnel, tokio::task::JoinHandle<()>)>>,
 }
 
 #[derive(Clone)]
@@ -166,11 +190,38 @@ impl ProtocolHandler for Handler {
     }
 }
 
-/// Start a console in this process. `open`: keep sessions, refresh the directory, serve IPC.
+/// Load `gangli.console`, making the console key and the local token on first use.
+pub fn load_state() -> Result<ConsoleState> {
+    let st: ConsoleState = store::load(&path())?;
+    if store::secret_from_hex(&st.console.key).is_ok() && !st.console.token.is_empty() {
+        return Ok(st);
+    }
+    store::update(&path(), HEADER, |st: &mut ConsoleState| {
+        if store::secret_from_hex(&st.console.key).is_err() {
+            st.console.key = store::secret_to_hex(&SecretKey::generate());
+        }
+        if st.console.token.is_empty() {
+            st.console.token = HEXLOWER.encode(&random16());
+        }
+        Ok(st.clone())
+    })
+}
+
+/// Start a console in this process. `open`: own the local port, keep sessions, refresh the directory,
+/// serve the API and the tunnels.
 pub async fn start(open: bool) -> Result<Arc<Console>> {
-    let sk = store::secret_key(&dir(), KEY_FILE)?;
+    let state = load_state()?;
+    let sk = store::secret_from_hex(&state.console.key)?;
     let me = sk.public();
-    let state: ConsoleState = store::load(&dir(), FILE)?;
+    let port = state.console.port;
+    // The port is the single-instance guard: bind it before anything else.
+    let listener = if open {
+        Some(TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
+            anyhow!("cannot open the console on 127.0.0.1:{port} ({e}): another console is already open, or change [console] port in gangli.console")
+        })?)
+    } else {
+        None
+    };
     let ep = Endpoint::builder(presets::N0).secret_key(sk).bind().await.ctx("start endpoint")?;
     let c = Arc::new(Console {
         me,
@@ -183,25 +234,60 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         published: Mutex::default(),
         started: Instant::now(),
         stop: Notify::new(),
-        internal_token: OnceLock::new(),
-        api_task: Mutex::new(None),
+        saved_at: Mutex::new(store::modified(&path())),
+        tunnels: Mutex::default(),
     });
     let router = Router::builder(ep).accept(proto::ALPN, Handler { c: c.clone() }).spawn();
     let _ = c.router.set(router);
-    if open {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port();
-        let token = HEXLOWER.encode(&random16());
-        let _ = c.internal_token.set(token.clone());
-        let pf = PortFile { port, token, pid: std::process::id() };
-        store::write_private(&dir().join(PORT_FILE), &serde_json::to_vec(&pf)?)?;
+    if let Some(listener) = listener {
         spawn_http(c.clone(), listener);
-        start_api(&c).await;
+        sync_tunnels(&c);
         tokio::spawn(manager(c.clone()));
         tokio::spawn(directory_loop(c.clone()));
-        clog(&format!("{} console open, id {me}", crate::version_line()));
+        tokio::spawn(watch_file(c.clone()));
+        clog(&format!("{} open on 127.0.0.1:{port}, id {me}", crate::version_line()));
     }
     Ok(c)
+}
+
+/// Hand edits of `gangli.console` while open: reload (keeping the live inventories) and apply.
+async fn watch_file(c: Arc<Console>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let m = store::modified(&path());
+        if m.is_none() || m == *c.saved_at.lock().unwrap() {
+            continue;
+        }
+        match store::load::<ConsoleState>(&path()) {
+            Ok(mut fresh) => {
+                {
+                    let mut st = c.state.lock().unwrap();
+                    for n in fresh.networks.iter_mut() {
+                        for x in n.nodes.iter_mut() {
+                            x.inventory = st
+                                .networks
+                                .iter()
+                                .flat_map(|o| o.nodes.iter())
+                                .find(|o| o.id == x.id)
+                                .and_then(|o| o.inventory.clone());
+                        }
+                    }
+                    // Keep the identity and local token of the running console.
+                    fresh.console.key = st.console.key.clone();
+                    fresh.console.token = st.console.token.clone();
+                    *st = fresh;
+                }
+                *c.saved_at.lock().unwrap() = m;
+                clog("gangli.console changed by hand: applied");
+                sync_tunnels(&c);
+            }
+            Err(e) => {
+                // Half-written or mistyped: say it once, keep the running state.
+                *c.saved_at.lock().unwrap() = m;
+                clog(&format!("gangli.console not applied: {e:#}"));
+            }
+        }
+    }
 }
 
 impl Console {
@@ -210,8 +296,8 @@ impl Console {
     }
 
     pub async fn shutdown(&self) {
-        if self.open {
-            let _ = std::fs::remove_file(dir().join(PORT_FILE));
+        for (_, (_, task)) in self.tunnels.lock().unwrap().drain() {
+            task.abort();
         }
         for l in self.live.lock().unwrap().values() {
             l.conn.close(0u32.into(), b"console closed");
@@ -221,15 +307,17 @@ impl Console {
         }
     }
 
+    /// Write `gangli.console` (live inventories stay in memory: they are not configuration).
     fn save(&self) {
-        let snapshot = self.state.lock().unwrap().clone();
-        match serde_json::to_vec_pretty(&snapshot) {
-            Ok(b) => {
-                if let Err(e) = store::write_private(&dir().join(FILE), &b) {
-                    clog(&format!("cannot save state: {e:#}"));
-                }
+        let mut snapshot = self.state.lock().unwrap().clone();
+        for n in snapshot.networks.iter_mut() {
+            for x in n.nodes.iter_mut() {
+                x.inventory = None;
             }
-            Err(e) => clog(&format!("cannot save state: {e}")),
+        }
+        match store::save(&path(), HEADER, &snapshot) {
+            Ok(()) => *self.saved_at.lock().unwrap() = store::modified(&path()),
+            Err(e) => clog(&format!("cannot save gangli.console: {e:#}")),
         }
     }
 
@@ -714,25 +802,80 @@ fn spawn_http(c: Arc<Console>, listener: TcpListener) -> tokio::task::JoinHandle
     tokio::spawn(fut)
 }
 
-/// (Re)start the API listener on its fixed port, if enabled.
-async fn start_api(c: &Arc<Console>) {
-    if let Some(t) = c.api_task.lock().unwrap().take() {
-        t.abort();
-    }
-    let (enabled, port) = {
-        let st = c.state.lock().unwrap();
-        (st.api.enabled, st.api.port)
-    };
-    if !enabled || !c.open {
+/// Start the listeners of the enabled tunnels, stop those removed, disabled or changed.
+fn sync_tunnels(c: &Arc<Console>) {
+    if !c.open {
         return;
     }
-    match TcpListener::bind(("127.0.0.1", port)).await {
-        Ok(l) => {
-            *c.api_task.lock().unwrap() = Some(spawn_http(c.clone(), l));
-            clog(&format!("API on http://127.0.0.1:{port}/v1"));
+    let wanted: Vec<Tunnel> = c.state.lock().unwrap().tunnels.iter().filter(|t| t.enabled).cloned().collect();
+    let mut running = c.tunnels.lock().unwrap();
+    running.retain(|name, (t, task)| {
+        let keep = wanted.iter().any(|w| w == t) && !task.is_finished();
+        if !keep {
+            task.abort();
+            clog(&format!("tunnel {name} stopped"));
         }
-        Err(e) => clog(&format!("API port {port} not available: {e}")),
+        keep
+    });
+    for t in wanted {
+        if running.contains_key(&t.name) {
+            continue;
+        }
+        let task = tokio::spawn(run_tunnel(c.clone(), t.clone()));
+        running.insert(t.name.clone(), (t, task));
     }
+}
+
+/// One tunnel: every local connection goes to the machine over its session (dialed again if it dropped)
+/// and on to the target from there.
+async fn run_tunnel(c: Arc<Console>, t: Tunnel) {
+    let listener = match TcpListener::bind(t.listen.as_str()).await {
+        Ok(l) => l,
+        Err(e) => {
+            clog(&format!("tunnel {}: cannot listen on {}: {e}", t.name, t.listen));
+            return;
+        }
+    };
+    clog(&format!("tunnel {}: {} → {} via {}", t.name, t.listen, t.target, t.node));
+    loop {
+        let Ok((sock, _)) = listener.accept().await else { continue };
+        let (c, t) = (c.clone(), t.clone());
+        tokio::spawn(async move {
+            if let Err(e) = forward_one(&c, &t, sock).await {
+                clog(&format!("tunnel {}: {e:#}", t.name));
+            }
+        });
+    }
+}
+
+async fn forward_one(c: &Arc<Console>, t: &Tunnel, mut sock: tokio::net::TcpStream) -> Result<()> {
+    let (net, _, node) = find_node(c, &t.node)?;
+    let conn = ensure_live(c, &net, &node).await?;
+    let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
+    proto::write_frame(&mut send, &Req::Forward { target: t.target.clone() }).await?;
+    match tokio::time::timeout(Duration::from_secs(20), proto::read_frame::<_, Resp>(&mut recv)).await {
+        Ok(Ok(Resp::Forwarding)) => {}
+        Ok(Ok(Resp::Error { message })) => bail!("{message}"),
+        Ok(Ok(_)) => bail!("unexpected answer"),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => bail!("no answer from {}", t.node),
+    }
+    let mut remote = tokio::io::join(recv, send);
+    let _ = tokio::io::copy_bidirectional(&mut sock, &mut remote).await;
+    Ok(())
+}
+
+fn tunnels_json(c: &Console) -> Value {
+    let st = c.state.lock().unwrap();
+    let running = c.tunnels.lock().unwrap();
+    json!(st
+        .tunnels
+        .iter()
+        .map(|t| json!({
+            "name": t.name, "node": t.node, "listen": t.listen, "target": t.target, "enabled": t.enabled,
+            "active": running.get(&t.name).is_some_and(|(_, task)| !task.is_finished()),
+        }))
+        .collect::<Vec<_>>())
 }
 
 enum Caller {
@@ -744,10 +887,10 @@ enum Caller {
 
 fn caller(c: &Console, token: Option<&str>) -> Option<Caller> {
     let token = token?;
-    if c.internal_token.get().is_some_and(|t| eq_ct(t, token)) {
+    let st = c.state.lock().unwrap();
+    if !st.console.token.is_empty() && eq_ct(&st.console.token, token) {
         return Some(Caller::Local);
     }
-    let st = c.state.lock().unwrap();
     if !st.api.enabled {
         return None;
     }
@@ -798,11 +941,11 @@ async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
     let _ = crate::http::write_response(&mut w, 200, &body).await;
 }
 
-fn api_json(api: &ApiConfig) -> Value {
+fn api_json(api: &ApiConfig, port: u16) -> Value {
     json!({
         "enabled": api.enabled,
-        "port": api.port,
-        "url": format!("http://127.0.0.1:{}/v1", api.port),
+        "port": port,
+        "url": format!("http://127.0.0.1:{port}/v1"),
         "tokens": api.tokens.iter().map(|t| json!({ "name": t.name, "scope": t.scope, "created": t.created })).collect::<Vec<_>>(),
     })
 }
@@ -888,7 +1031,14 @@ fn add_network(c: &Console, key: SecretKey, name: Option<String>) -> Result<Stri
 }
 
 /// One operation, from the IPC (open console) or from a one-shot CLI console.
+#[derive(PartialEq)]
+enum OpKind {
+    ApiEnable,
+    Other,
+}
+
 pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
+    let op_kind = if matches!(op, IpcOp::ApiEnable) { OpKind::ApiEnable } else { OpKind::Other };
     match op {
         IpcOp::Status => {
             let st = c.state.lock().unwrap();
@@ -989,38 +1139,30 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             }
             Ok(json!({ "forgot": node }))
         }
-        IpcOp::ApiStatus => Ok(api_json(&c.state.lock().unwrap().api)),
-        IpcOp::ApiEnable { port } => {
-            {
-                let mut st = c.state.lock().unwrap();
-                st.api.enabled = true;
-                if let Some(p) = port {
-                    st.api.port = p;
-                }
-            }
-            c.save();
-            start_api(c).await;
-            Ok(api_json(&c.state.lock().unwrap().api))
+        IpcOp::ApiStatus => {
+            let st = c.state.lock().unwrap();
+            Ok(api_json(&st.api, st.console.port))
         }
-        IpcOp::ApiDisable => {
-            c.state.lock().unwrap().api.enabled = false;
+        IpcOp::ApiEnable | IpcOp::ApiDisable => {
+            let on = matches!(op_kind, OpKind::ApiEnable);
+            c.state.lock().unwrap().api.enabled = on;
             c.save();
-            start_api(c).await;
-            Ok(api_json(&c.state.lock().unwrap().api))
+            let st = c.state.lock().unwrap();
+            Ok(api_json(&st.api, st.console.port))
         }
         IpcOp::ApiTokenAdd { name, scope } => {
             if scope != "read" && scope != "admin" {
                 bail!("scope must be read or admin");
             }
             let token = format!("gat_{}", HEXLOWER.encode(&random16()));
-            let api = {
+            let (enabled, port) = {
                 let mut st = c.state.lock().unwrap();
                 st.api.tokens.retain(|t| t.name != name);
                 st.api.tokens.push(ApiToken { name: name.clone(), scope: scope.clone(), token: token.clone(), created: now() });
-                st.api.clone()
+                (st.api.enabled, st.console.port)
             };
             c.save();
-            Ok(json!({ "name": name, "scope": scope, "token": token, "url": format!("http://127.0.0.1:{}/v1", api.port), "enabled": api.enabled }))
+            Ok(json!({ "name": name, "scope": scope, "token": token, "url": format!("http://127.0.0.1:{port}/v1"), "enabled": enabled }))
         }
         IpcOp::ApiTokenRemove { name } => {
             let removed = {
@@ -1034,6 +1176,52 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             }
             c.save();
             Ok(json!({ "removed": name }))
+        }
+        IpcOp::TunnelList => Ok(tunnels_json(c)),
+        IpcOp::TunnelAdd { name, node, target, listen } => {
+            find_node(c, &node)?;
+            let listen = match listen {
+                Some(l) if l.parse::<u16>().is_ok() => format!("127.0.0.1:{l}"),
+                Some(l) => l,
+                None => {
+                    // A free local port, kept from now on.
+                    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+                    format!("127.0.0.1:{}", l.local_addr()?.port())
+                }
+            };
+            let target = if target.parse::<u16>().is_ok() { format!("localhost:{target}") } else { target };
+            {
+                let mut st = c.state.lock().unwrap();
+                st.tunnels.retain(|t| t.name != name);
+                st.tunnels.push(Tunnel { name: name.clone(), node, listen: listen.clone(), target, enabled: true });
+            }
+            c.save();
+            sync_tunnels(c);
+            Ok(json!({ "tunnel": name, "listen": listen, "open": c.open }))
+        }
+        IpcOp::TunnelRemove { name } => {
+            let removed = {
+                let mut st = c.state.lock().unwrap();
+                let before = st.tunnels.len();
+                st.tunnels.retain(|t| t.name != name);
+                before - st.tunnels.len()
+            };
+            if removed == 0 {
+                bail!("no tunnel named {name}");
+            }
+            c.save();
+            sync_tunnels(c);
+            Ok(json!({ "removed": name }))
+        }
+        IpcOp::TunnelSet { name, enabled } => {
+            {
+                let mut st = c.state.lock().unwrap();
+                let t = st.tunnels.iter_mut().find(|t| t.name == name).ok_or_else(|| anyhow!("no tunnel named {name}"))?;
+                t.enabled = enabled;
+            }
+            c.save();
+            sync_tunnels(c);
+            Ok(tunnels_json(c))
         }
         IpcOp::Stop => {
             c.stop.notify_one();
@@ -1077,9 +1265,6 @@ async fn one_shot_round(c: &Arc<Console>) {
 
 /// `gangli console run`: an open console in the foreground, until `console stop` or the process ends.
 pub fn run_foreground() -> Result<()> {
-    let Some(lock) = try_lock()? else {
-        bail!("a gangli console is already open for this user");
-    };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let r = rt.block_on(async {
         let c = start(true).await?;
@@ -1088,15 +1273,11 @@ pub fn run_foreground() -> Result<()> {
         c.shutdown().await;
         Ok(())
     });
-    drop(lock);
     r
 }
 
 /// A CLI command with no open console: run it in a one-shot console in this process.
 pub fn run_once(op: IpcOp) -> Result<Value> {
-    let Some(lock) = try_lock()? else {
-        bail!("a console is starting for this user; try again in a moment");
-    };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let r = rt.block_on(async {
         let c = start(false).await?;
@@ -1104,6 +1285,5 @@ pub fn run_once(op: IpcOp) -> Result<Value> {
         c.shutdown().await;
         r
     });
-    drop(lock);
     r
 }

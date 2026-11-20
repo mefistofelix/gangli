@@ -100,22 +100,30 @@ fn win_quote(a: &str) -> String {
 
 #[cfg(windows)]
 fn relaunch_elevated() -> std::io::Result<()> {
+    use std::io::Read;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::CloseHandle;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW};
     use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
     use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain([0]).collect() };
+    // The elevated copy writes its output into a named pipe that this process reads: nothing on disk.
+    let pipe_name = format!(r"\.\pipe\gangli-elevated-{}-{}", std::process::id(), data_encoding::HEXLOWER.encode(&crate::util::random16()[..6]));
+    const PIPE_ACCESS_INBOUND: u32 = 0x1;
+    let pipe = unsafe { CreateNamedPipeW(wide(&pipe_name).as_ptr(), PIPE_ACCESS_INBOUND, 0, 1, 0, 65536, 0, std::ptr::null()) };
+    if pipe == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+
     let exe = std::env::current_exe()?;
-    // Portable: the relay file lives next to the binary too (the elevated copy can always write there).
-    let out = crate::paths::data_dir().join(format!("elevated-{}.txt", std::process::id()));
-    let _ = std::fs::remove_file(&out);
-    let mut params = format!("--elevated-output {}", win_quote(&out.to_string_lossy()));
+    let mut params = format!("--elevated-output {}", win_quote(&pipe_name));
     for a in std::env::args().skip(1) {
         params.push(' ');
         params.push_str(&win_quote(&a));
     }
-    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain([0]).collect() };
     let verb = wide("runas");
     let file: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
     let params_w = wide(&params);
@@ -129,11 +137,22 @@ fn relaunch_elevated() -> std::io::Result<()> {
     info.nShow = SW_HIDE;
     // Shows the UAC consent prompt.
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        unsafe { CloseHandle(pipe) };
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "administrator rights are needed and the prompt was refused",
         ));
     }
+    let raw = pipe as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let h = raw as windows_sys::Win32::Foundation::HANDLE;
+        unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) };
+        let mut f = unsafe { std::fs::File::from_raw_handle(h as _) };
+        let mut out = Vec::new();
+        let _ = f.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
     let mut code: u32 = 1;
     if !info.hProcess.is_null() {
         unsafe {
@@ -142,15 +161,14 @@ fn relaunch_elevated() -> std::io::Result<()> {
             CloseHandle(info.hProcess);
         }
     }
-    if let Ok(text) = std::fs::read_to_string(&out) {
-        print!("{text}");
+    if let Ok(out) = rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        print!("{}", String::from_utf8_lossy(&out));
     }
-    let _ = std::fs::remove_file(&out);
     std::process::exit(code as i32);
 }
 
-/// In the elevated copy: `--elevated-output <file>` (added by [`relaunch_elevated`]) sends stdout and stderr
-/// to that file. Removes the two arguments so clap never sees them.
+/// In the elevated copy: `--elevated-output <pipe>` (added by [`relaunch_elevated`]) sends stdout and stderr
+/// to the pipe of the process that asked for elevation. Removes the two arguments so clap never sees them.
 #[cfg(windows)]
 pub fn adopt_elevated_output(args: &mut Vec<std::ffi::OsString>) {
     use std::os::windows::io::IntoRawHandle;
@@ -160,10 +178,7 @@ pub fn adopt_elevated_output(args: &mut Vec<std::ffi::OsString>) {
     }
     let path = args.remove(2);
     args.remove(1);
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(f) = std::fs::File::create(&path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
         let h = f.into_raw_handle();
         unsafe {
             SetStdHandle(STD_OUTPUT_HANDLE, h as _);

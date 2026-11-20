@@ -32,8 +32,9 @@ when a decision changes.
 - **No polling of nodes.** Presence comes from live sessions; a node sends traffic only for pings on an open
   session, knocks on events (start, address change, session drop) and inventory changes. A periodic network
   call from the node is a regression.
-- **Portable.** Everything gangli keeps goes in `gangli-data/` next to the executable (`paths.rs`); never a
-  system or user folder, never `%APPDATA%`, `~/.config`, `/var/lib`. Only the OS service registration is
+- **Portable, two files.** Everything gangli keeps goes in `gangli.node` and `gangli.console` (TOML) next to
+  the executable, plus `gangli.log` (`paths.rs`); never a system or user folder, never `%APPDATA%`,
+  `~/.config`, `/var/lib`, no lock, port or temp files next to them either. Only the OS service registration is
   written elsewhere, by `install`.
 - **Secrets** (node keys, console keys, network keys, API tokens, `.tools/box-password`) live in files readable
   only by their owner (root / SYSTEM / the user) and are never printed, logged or committed.
@@ -97,8 +98,8 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
 ## Testing
 
 - Unit tests run on build-box as part of every build (`cargo test` on the native target of each runner).
-- End to end on one PC, no elevation, no service: `GANGLI_DATA_DIR` replaces `gangli-data/`, one scratch
-  folder per simulated machine. `network create` on a
+- End to end on one PC, no elevation, no service: `GANGLI_DATA_DIR` puts the files in another folder, one
+  scratch folder per simulated machine (or simply copies of the binary in separate folders). `network create` on a
   console (`console run` in the background of the test), `node --code` for one or more nodes (each its own
   state dir), then `nodes` / `info`; kill a node and restart it to check that it shows offline and comes back
   by itself; a second console dir with `network add <private code>` must find the machines. The traffic

@@ -91,7 +91,7 @@ pub fn status(json: bool) -> Result<()> {
         return Ok(());
     }
     println!("{}", crate::version_line());
-    println!("node id {me} ({mode} mode, state in {})", state::dir().display());
+    println!("node id {me} ({mode} mode, {})", crate::paths::node_file().display());
     if nets.is_empty() {
         println!("not in any network: `gangli join <public code>`");
     }

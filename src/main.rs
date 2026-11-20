@@ -62,6 +62,12 @@ enum Command {
         /// Public network code; default: the one embedded in the binary, if any.
         #[arg(long, alias = "invite", alias = "join")]
         code: Option<String>,
+        /// Run the service as this account instead of SYSTEM / root (sessions only as that user).
+        #[arg(long)]
+        user: Option<String>,
+        /// The account's password (Windows only, for the service manager).
+        #[arg(long)]
+        password: Option<String>,
     },
     /// node: stop and remove the service and its state (one elevation prompt).
     Uninstall,
@@ -92,6 +98,9 @@ enum Command {
     /// console: the local API for programs and LLM agents (off by default, tokens).
     #[command(subcommand)]
     Api(ApiCmd),
+    /// console: saved tunnels to a machine's LAN, active while a console is open.
+    #[command(subcommand)]
+    Tunnel(TunnelCmd),
     /// Copy a gangli binary with a public code embedded: running it is enough to become a node.
     Pack {
         /// Public network code to embed.
@@ -129,16 +138,38 @@ enum NetworkCmd {
 enum ApiCmd {
     /// Whether it is enabled, its address, the tokens.
     Status,
-    /// Enable it (on 127.0.0.1, default port 7373).
-    Enable {
-        #[arg(long)]
-        port: Option<u16>,
-    },
+    /// Enable it (on the console's local port, 127.0.0.1:7373 by default).
+    Enable,
     /// Disable it (the tokens are kept).
     Disable,
     /// Access tokens.
     #[command(subcommand)]
     Token(TokenCmd),
+}
+
+#[derive(Subcommand)]
+enum TunnelCmd {
+    /// Save a tunnel: this computer's `--listen` port goes to `target` as seen from the machine.
+    Add {
+        name: String,
+        /// The machine (name or name.network).
+        #[arg(long)]
+        node: String,
+        /// Where to connect from the machine: `host:port` in its LAN, or just a port for its localhost.
+        #[arg(long)]
+        target: String,
+        /// Local address or port (default: a free port, kept).
+        #[arg(long)]
+        listen: Option<String>,
+    },
+    /// Remove a tunnel.
+    Remove { name: String },
+    /// The saved tunnels.
+    List,
+    /// Turn a tunnel on.
+    On { name: String },
+    /// Turn a tunnel off (kept in the list).
+    Off { name: String },
 }
 
 #[derive(Subcommand)]
@@ -223,12 +254,12 @@ fn main() {
             Ok(())
         }
         Some(Command::Node { code }) => node_cmd::run(code),
-        Some(Command::Install { code }) => {
+        Some(Command::Install { code, user, password }) => {
             let code = code.or_else(embed::embedded_code);
             match code.as_deref().map(code::decode) {
                 Some(Err(e)) => Err(e),
                 Some(Ok(code::Code::Private { .. })) => Err(anyhow::anyhow!("that is a private code: never put it on a managed machine")),
-                _ => service::install(code.as_deref()).map_err(io_err),
+                _ => service::install(&service::InstallOpts { code, user, password }).map_err(io_err),
             }
         }
         Some(Command::Uninstall) => service::uninstall().map_err(io_err),
@@ -255,10 +286,20 @@ fn main() {
         Some(Command::Api(a)) => console_cmd::api(
             match a {
                 ApiCmd::Status | ApiCmd::Token(TokenCmd::List) => ipc::IpcOp::ApiStatus,
-                ApiCmd::Enable { port } => ipc::IpcOp::ApiEnable { port },
+                ApiCmd::Enable => ipc::IpcOp::ApiEnable,
                 ApiCmd::Disable => ipc::IpcOp::ApiDisable,
                 ApiCmd::Token(TokenCmd::Add { name, scope }) => ipc::IpcOp::ApiTokenAdd { name, scope },
                 ApiCmd::Token(TokenCmd::Remove { name }) => ipc::IpcOp::ApiTokenRemove { name },
+            },
+            json,
+        ),
+        Some(Command::Tunnel(t)) => console_cmd::tunnel(
+            match t {
+                TunnelCmd::Add { name, node, target, listen } => ipc::IpcOp::TunnelAdd { name, node, target, listen },
+                TunnelCmd::Remove { name } => ipc::IpcOp::TunnelRemove { name },
+                TunnelCmd::List => ipc::IpcOp::TunnelList,
+                TunnelCmd::On { name } => ipc::IpcOp::TunnelSet { name, enabled: true },
+                TunnelCmd::Off { name } => ipc::IpcOp::TunnelSet { name, enabled: false },
             },
             json,
         ),
@@ -285,14 +326,21 @@ pub(crate) fn agent_loop(stop: Arc<AtomicBool>) {
     node::run_blocking(stop);
 }
 
-/// Timestamped line to `node.log` in the node's state dir, and to stderr (visible when run by hand).
+/// Node log line: stderr (visible when run by hand) and `gangli.log`.
 pub(crate) fn log_line(msg: &str) {
+    eprintln!("{} {msg}", util::now());
+    log_to_file(&format!("node: {msg}"));
+}
+
+/// Append a timestamped line to `gangli.log` next to the binary, restarting it past 1 MB.
+pub(crate) fn log_to_file(msg: &str) {
     use std::io::Write;
-    let line = format!("{} {msg}", util::now());
-    eprintln!("{line}");
-    let path = paths::node_dir().join("node.log");
+    let path = paths::log_file();
+    if std::fs::metadata(&path).map(|m| m.len() > 1 << 20).unwrap_or(false) {
+        let _ = std::fs::write(&path, b"");
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{line}");
+        let _ = writeln!(f, "{} {msg}", util::now());
     }
 }
 
@@ -308,9 +356,9 @@ mod tests {
     #[test]
     fn cli_parses() {
         let cli = super::Cli::try_parse_from(["gangli", "install", "--code", "abc"]).unwrap();
-        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_) })));
+        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_), .. })));
         let cli = super::Cli::try_parse_from(["gangli", "install", "--invite", "abc"]).unwrap();
-        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_) })));
+        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_), .. })));
         let cli = super::Cli::try_parse_from(["gangli", "network", "add", "k", "--json"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(super::Command::Network(super::NetworkCmd::Add { .. }))));

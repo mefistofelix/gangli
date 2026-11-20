@@ -1,9 +1,12 @@
 //! Install, uninstall and run the node's system service, one implementation per OS (section 10 of
-//! docs/ARCHITECTURE.md). gangli is portable: the service runs the binary **where it is**, with its data in
-//! `gangli-data/` next to it. Because a service runs as SYSTEM / root, its folder must not be writable by
-//! ordinary users (anyone could swap the binary): `install` requires a folder of its own and makes it
-//! writable by administrators only, leaving `gangli-data/console/` to the user who installs; `uninstall`
-//! gives the folder back.
+//! docs/ARCHITECTURE.md). gangli is portable: the service runs the binary **where it is**, with
+//! `gangli.node` next to it. Because the service runs as SYSTEM / root (or the account given with `--user`),
+//! its folder must not be writable by ordinary users (anyone could swap the binary): `install` requires a
+//! folder of its own and makes it writable by administrators only, `gangli.node` readable only by them
+//! (and the service account), `gangli.console` still the installing user's. `uninstall` gives the folder
+//! back; the node keeps its identity.
+//!
+//! Elevation is asked only here (and for node commands once the service is installed).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,18 +26,27 @@ mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux::{install, run, uninstall};
 
+/// `gangli install` options.
+pub struct InstallOpts {
+    pub code: Option<String>,
+    /// Account the service runs as (default SYSTEM / root).
+    pub user: Option<String>,
+    /// Its password (Windows service manager only).
+    pub password: Option<String>,
+}
+
 fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
-/// Files that may share gangli's folder: its binaries (any OS), a `gangli.code`, its data.
+/// Files that may share gangli's folder: its binaries (any OS), its files, a `gangli.code`.
 fn belongs_to_gangli(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.starts_with("gangli") || n == ".ds_store" || n == "desktop.ini"
 }
 
-/// Checks the folder, makes it admin-only, records the code. Returns the binary to register.
-pub(crate) fn prepare_install(code: Option<&str>) -> io::Result<PathBuf> {
+/// Checks the folder, records the settings and the code, locks the folder down. Returns the binary.
+pub(crate) fn prepare_install(o: &InstallOpts) -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = crate::paths::exe_dir();
     if crate::paths::dev_override().is_none() {
@@ -55,20 +67,32 @@ pub(crate) fn prepare_install(code: Option<&str>) -> io::Result<PathBuf> {
             )));
         }
     }
-    for d in [crate::paths::node_dir(), crate::paths::console_dir()] {
-        std::fs::create_dir_all(&d)?;
-    }
-    harden(&dir)?;
-    std::fs::write(crate::paths::service_marker(), b"installed\n")?;
-    if let Some(c) = code {
+    let user = o.user.clone().unwrap_or_default();
+    crate::state::update(|st| {
+        st.node.installed = true;
+        st.node.service_user = user.clone();
+        Ok(())
+    })
+    .map_err(|e| other(format!("{e:#}")))?;
+    crate::state::node_key().map_err(|e| other(format!("{e:#}")))?;
+    if let Some(c) = &o.code {
         crate::state::add_join(c).map_err(|e| other(format!("{e:#}")))?;
     }
+    // gangli.console must exist to keep the user's rights on it.
+    let console = crate::paths::console_file();
+    if !console.exists() {
+        std::fs::write(&console, b"")?;
+    }
+    harden(&dir, o.user.as_deref())?;
     Ok(exe)
 }
 
 /// After the service is removed: the folder is the user's again; the node keeps its identity.
 pub(crate) fn finish_uninstall() -> io::Result<()> {
-    let _ = std::fs::remove_file(crate::paths::service_marker());
+    let _ = crate::state::update(|st| {
+        st.node.installed = false;
+        Ok(())
+    });
     unharden(&crate::paths::exe_dir())
 }
 
@@ -86,24 +110,26 @@ fn icacls(args: &[&str]) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn harden(dir: &Path) -> io::Result<()> {
+fn harden(dir: &Path, service_user: Option<&str>) -> io::Result<()> {
     if crate::paths::dev_override().is_some() {
         return Ok(());
     }
-    let d = dir.to_string_lossy().to_string();
+    let s = |p: &Path| p.to_string_lossy().to_string();
     // Folder and binary: SYSTEM + Administrators full, Users read & execute.
-    icacls(&[&d, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/t", "/q"])?;
-    // Node state: SYSTEM + Administrators only.
-    let node = crate::paths::node_dir().to_string_lossy().to_string();
-    icacls(&[&node, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/t", "/q"])?;
-    // Console state: also the user who installs.
+    icacls(&[&s(dir), "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/t", "/q"])?;
+    // gangli.node: SYSTEM + Administrators (+ the service account) only.
+    let node = s(&crate::paths::node_file());
+    icacls(&[&node, "/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F", "/q"])?;
+    if let Some(u) = service_user {
+        let _ = icacls(&[&node, "/grant", &format!("{u}:M"), "/q"]);
+    }
+    // gangli.console: also the user who installs.
     if let Ok(user) = std::env::var("USERNAME") {
         let who = match std::env::var("USERDOMAIN") {
-            Ok(dom) => format!("{dom}\\{user}:(OI)(CI)M"),
-            Err(_) => format!("{user}:(OI)(CI)M"),
+            Ok(dom) => format!("{dom}\\{user}:M"),
+            Err(_) => format!("{user}:M"),
         };
-        let console = crate::paths::console_dir().to_string_lossy().to_string();
-        let _ = icacls(&[&console, "/grant", &who, "/t", "/q"]);
+        let _ = icacls(&[&s(&crate::paths::console_file()), "/grant", &who, "/q"]);
     }
     Ok(())
 }
@@ -113,8 +139,7 @@ fn unharden(dir: &Path) -> io::Result<()> {
     if crate::paths::dev_override().is_some() {
         return Ok(());
     }
-    let d = dir.to_string_lossy().to_string();
-    icacls(&[&d, "/reset", "/t", "/q"])
+    icacls(&[&dir.to_string_lossy(), "/reset", "/t", "/q"])
 }
 
 /// The user who asked for elevation (pkexec / sudo), to give the folder back to.
@@ -123,45 +148,55 @@ fn invoking_uid() -> Option<u32> {
     ["PKEXEC_UID", "SUDO_UID"].iter().find_map(|v| std::env::var(v).ok()?.parse().ok())
 }
 
+/// uid of a local account, through the standard `id` tool.
 #[cfg(unix)]
-fn chown_tree(p: &Path, uid: u32, gid: Option<u32>) {
-    let _ = std::os::unix::fs::chown(p, Some(uid), gid);
-    if let Ok(rd) = std::fs::read_dir(p) {
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.is_dir() {
-                chown_tree(&path, uid, gid);
-            } else {
-                let _ = std::os::unix::fs::chown(&path, Some(uid), gid);
-            }
-        }
-    }
+fn uid_of(user: &str) -> Option<u32> {
+    let out = std::process::Command::new("id").arg("-u").arg(user).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 #[cfg(unix)]
-fn harden(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn harden(dir: &Path, service_user: Option<&str>) -> io::Result<()> {
+    use std::os::unix::fs::{chown, PermissionsExt};
     if crate::paths::dev_override().is_some() {
         return Ok(());
     }
-    // Folder, binaries and node state: root's; console state: the invoking user's.
-    chown_tree(dir, 0, Some(0));
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
-    std::fs::set_permissions(crate::paths::data_dir(), std::fs::Permissions::from_mode(0o755))?;
-    std::fs::set_permissions(crate::paths::node_dir(), std::fs::Permissions::from_mode(0o700))?;
-    if let Some(uid) = invoking_uid() {
-        chown_tree(&crate::paths::console_dir(), uid, None);
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+    // Folder and binaries: root's, readable by all.
+    chown(dir, Some(0), Some(0))?;
+    mode(dir, 0o755)?;
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let p = e.path();
+        let _ = chown(&p, Some(0), Some(0));
     }
+    // gangli.node: root (or the service account) only.
+    let node = crate::paths::node_file();
+    let owner = match service_user {
+        Some(u) => uid_of(u).ok_or_else(|| other(format!("no local account {u}")))?,
+        None => 0,
+    };
+    chown(&node, Some(owner), None)?;
+    mode(&node, 0o600)?;
+    // gangli.console: the user who installs.
+    let console = crate::paths::console_file();
+    if let Some(uid) = invoking_uid() {
+        chown(&console, Some(uid), None)?;
+    }
+    mode(&console, 0o600)?;
     Ok(())
 }
 
 #[cfg(unix)]
 fn unharden(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::chown;
     if crate::paths::dev_override().is_some() {
         return Ok(());
     }
     if let Some(uid) = invoking_uid() {
-        chown_tree(dir, uid, None);
+        chown(dir, Some(uid), None)?;
+        for e in std::fs::read_dir(dir)?.flatten() {
+            let _ = chown(e.path(), Some(uid), None);
+        }
     }
     Ok(())
 }

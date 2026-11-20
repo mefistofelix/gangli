@@ -1,10 +1,10 @@
-//! Owner-only JSON files with a cross-process lock. Both the service state and the client state use it: the
-//! CLI (elevated) and the running service change the same state file, so every change takes the lock, reads,
-//! modifies and writes atomically (temp file + rename). Readers that only look (the service's periodic scan)
-//! read without the lock: the rename makes every read see a whole file.
+//! The two configuration files (`gangli.node`, `gangli.console`, TOML, next to the binary). A change takes an
+//! exclusive lock on the file itself, reads it, applies the change and rewrites it in place, so no other file
+//! (lock, temp) ever appears next to it. Readers that only look (the node's 2-second rescan) read without
+//! the lock and simply retry on the next scan if they catch a half-written file.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
@@ -13,68 +13,84 @@ use iroh::SecretKey;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-pub fn ensure_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+fn open_rw(path: &Path) -> Result<File> {
+    let mut o = OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
     }
-    Ok(())
+    o.open(path).with_context(|| format!("open {}", path.display()))
 }
 
-/// Write a file readable only by its owner, atomically. Concurrent writers each use their own temp file.
-pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
-    {
-        let mut o = OpenOptions::new();
-        o.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(0o600);
-        }
-        let mut f = o.open(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-        f.write_all(data)?;
-        f.sync_all()?;
+fn parse<T: DeserializeOwned + Default>(path: &Path, text: &str) -> Result<T> {
+    if text.trim().is_empty() {
+        return Ok(T::default());
     }
-    fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+    toml::from_str(text).with_context(|| format!("{} is not valid (fix or delete it)", path.display()))
 }
 
-pub fn load<T: DeserializeOwned + Default>(dir: &Path, name: &str) -> Result<T> {
-    let p = dir.join(name);
-    match fs::read(&p) {
-        Ok(b) => serde_json::from_slice(&b).with_context(|| format!("parse {}", p.display())),
+pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => parse(path, &s),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
 
-fn lock(dir: &Path) -> Result<File> {
-    ensure_dir(dir)?;
-    let f = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".lock"))
-        .context("open lock file")?;
-    f.lock().context("lock state")?;
-    Ok(f)
+fn render<T: Serialize>(header: &str, v: &T) -> Result<String> {
+    let body = toml::to_string_pretty(v).map_err(|e| anyhow!("cannot write the configuration: {e}"))?;
+    let mut out = String::new();
+    for line in header.lines() {
+        out.push_str("# ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&body);
+    Ok(out)
 }
 
-/// Read-modify-write under the lock.
-pub fn update<T, R>(dir: &Path, name: &str, f: impl FnOnce(&mut T) -> Result<R>) -> Result<R>
+/// Read-modify-write under an exclusive lock on the file itself.
+pub fn update<T, R>(path: &Path, header: &str, f: impl FnOnce(&mut T) -> Result<R>) -> Result<R>
 where
     T: DeserializeOwned + Serialize + Default,
 {
-    let _lock = lock(dir)?;
-    let mut v: T = load(dir, name)?;
+    let mut file = open_rw(path)?;
+    file.lock().context("lock the configuration")?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let mut v: T = parse(path, &text)?;
     let r = f(&mut v)?;
-    write_private(&dir.join(name), &serde_json::to_vec_pretty(&v)?)?;
+    let out = render(header, &v)?;
+    if out != text {
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(out.as_bytes())?;
+        file.sync_all()?;
+    }
     Ok(r)
+}
+
+/// Overwrite with `v` (the console, which is the only writer of its file while open).
+pub fn save<T: Serialize>(path: &Path, header: &str, v: &T) -> Result<()> {
+    let out = render(header, v)?;
+    let mut file = open_rw(path)?;
+    file.lock().context("lock the configuration")?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    if out != text {
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(out.as_bytes())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 pub fn secret_from_hex(s: &str) -> Result<SecretKey> {
@@ -89,17 +105,49 @@ pub fn secret_to_hex(k: &SecretKey) -> String {
     HEXLOWER.encode(&k.to_bytes())
 }
 
-/// Load the key in `dir/name`, creating it on first use. Never overwrites an existing key.
-pub fn secret_key(dir: &Path, name: &str) -> Result<SecretKey> {
-    let _lock = lock(dir)?;
-    let p = dir.join(name);
-    match fs::read_to_string(&p) {
-        Ok(s) => secret_from_hex(&s).with_context(|| format!("key in {}", p.display())),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            let k = SecretKey::generate();
-            write_private(&p, secret_to_hex(&k).as_bytes())?;
-            Ok(k)
-        }
-        Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Serialize, Deserialize, Default, PartialEq, Debug)]
+    struct T {
+        #[serde(default)]
+        a: String,
+        #[serde(default)]
+        list: Vec<Item>,
+    }
+    #[derive(Serialize, Deserialize, Default, PartialEq, Debug)]
+    struct Item {
+        name: String,
+        n: u32,
+    }
+
+    #[test]
+    fn update_in_place() {
+        let dir = std::env::temp_dir().join(format!("gangli-store-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.toml");
+        update(&p, "header line", |t: &mut T| {
+            t.a = "hello".into();
+            t.list.push(Item { name: "one".into(), n: 1 });
+            Ok(())
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# header line\n"));
+        let back: T = load(&p).unwrap();
+        assert_eq!(back.a, "hello");
+        assert_eq!(back.list.len(), 1);
+        // shorter content after a change must not leave garbage behind
+        update(&p, "h", |t: &mut T| {
+            t.list.clear();
+            Ok(())
+        })
+        .unwrap();
+        let back: T = load(&p).unwrap();
+        assert!(back.list.is_empty());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no extra files next to the configuration");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -239,3 +239,41 @@ pub fn api(op: IpcOp, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn tunnel(op: IpcOp, json: bool) -> Result<()> {
+    let v = ipc::call(op)?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    if let Some(name) = v.get("tunnel").and_then(|n| n.as_str()) {
+        println!("tunnel {name} saved: {}", v["listen"].as_str().unwrap_or(""));
+        if v["open"].as_bool() != Some(true) {
+            println!("active while a console is open (GUI / tray or `gangli console run`)");
+        }
+        return Ok(());
+    }
+    if let Some(name) = v.get("removed").and_then(|n| n.as_str()) {
+        println!("tunnel {name} removed");
+        return Ok(());
+    }
+    let list = v.as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("no tunnels: `gangli tunnel add <name> --node <machine> --target <host:port>`");
+    }
+    for t in list {
+        let state = match (t["enabled"].as_bool(), t["active"].as_bool()) {
+            (Some(false), _) => "off",
+            (_, Some(true)) => "active",
+            _ => "on (console closed)",
+        };
+        println!(
+            "{:<14} {:<22} → {:<22} via {:<14} {state}",
+            t["name"].as_str().unwrap_or(""),
+            t["listen"].as_str().unwrap_or(""),
+            t["target"].as_str().unwrap_or(""),
+            t["node"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}

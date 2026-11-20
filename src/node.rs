@@ -350,8 +350,10 @@ fn admit(id: &str, a: proto::Admission, console: &PublicKey) -> Result<()> {
         if !consoles.contains(&console.to_string()) {
             consoles.push(console.to_string());
         }
+        let code = m.code.clone();
         *m = Membership {
             name: local.clone(),
+            code,
             id: id.clone(),
             join: None,
             cert: Some(a.cert.clone()),
@@ -437,6 +439,26 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     break;
                 }
             },
+            Req::Forward { target } if authed => {
+                tokio::spawn(async move {
+                    match tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(target.as_str())).await {
+                        Ok(Ok(mut tcp)) => {
+                            if proto::write_frame(&mut send, &Resp::Forwarding).await.is_ok() {
+                                let mut remote = tokio::io::join(recv, send);
+                                let _ = tokio::io::copy_bidirectional(&mut tcp, &mut remote).await;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{target}: {e}") }).await;
+                            let _ = send.finish();
+                        }
+                        Err(_) => {
+                            let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{target}: no answer") }).await;
+                            let _ = send.finish();
+                        }
+                    }
+                });
+            }
             Req::Info if authed => {
                 let inventory = collect().await;
                 let _ = proto::write_frame(&mut send, &Resp::Info { node_name: my_name.clone(), inventory }).await;

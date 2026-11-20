@@ -16,9 +16,12 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::paths::{SERVICE_DISPLAY, SERVICE_NAME};
 
-pub fn install(join: Option<&str>) -> io::Result<()> {
+pub fn install(o: &super::InstallOpts) -> io::Result<()> {
     crate::elevate::ensure_root()?;
-    let bin = super::prepare_install(join)?;
+    if o.user.is_some() && o.password.is_none() {
+        return Err(io::Error::other("Windows needs the account's password to run a service as it: add --password"));
+    }
+    let bin = super::prepare_install(o)?;
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
         .map_err(to_io)?;
@@ -31,8 +34,9 @@ pub fn install(join: Option<&str>) -> io::Result<()> {
         executable_path: bin,
         launch_arguments: vec![OsString::from("run"), OsString::from("--service")],
         dependencies: vec![],
-        account_name: None, // LocalSystem
-        account_password: None,
+        // LocalSystem unless an account is given (".\name" for a local one).
+        account_name: o.user.as_ref().map(|u| OsString::from(if u.contains('\\') || u.contains('@') { u.clone() } else { format!(".\\{u}") })),
+        account_password: o.password.as_ref().map(OsString::from),
     };
     let service = manager
         .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
@@ -57,7 +61,7 @@ pub fn uninstall() -> io::Result<()> {
         service.delete().map_err(to_io)?;
     }
     super::finish_uninstall()?;
-    println!("removed the gangli service; the node keeps its identity in gangli-data\node (delete the folder to remove everything)");
+    println!("removed the gangli service; the node keeps its identity in gangli.node (delete the folder to remove everything)");
     Ok(())
 }
 
