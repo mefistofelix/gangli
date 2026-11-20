@@ -129,7 +129,11 @@ pub fn collect() -> Inventory {
                 continue;
             }
             let mount = d.mount_point().to_string_lossy().to_string();
-            if inv.disks.iter().any(|x| x.mount == mount) {
+            if !useful_mount(&mount) || inv.disks.iter().any(|x| x.mount == mount) {
+                continue;
+            }
+            // Bind mounts of one file system (same size, same free space): the first one says it all.
+            if inv.disks.iter().any(|x| x.total == d.total_space() && x.avail == d.available_space()) {
                 continue;
             }
             inv.disks.push(DiskInfo { mount, total: d.total_space(), avail: d.available_space() });
@@ -156,6 +160,15 @@ pub fn collect() -> Inventory {
         inv.ips.sort_by_key(|s| s.contains(':'));
     }
     inv
+}
+
+/// Disks a person cares about: not the system's pseudo or bind mounts (containers, WSL, snaps, files).
+fn useful_mount(mount: &str) -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    const SKIP: [&str; 10] = ["/proc", "/sys", "/dev", "/run", "/snap", "/boot/efi", "/usr/lib/", "/mnt/wslg", "/var/lib/docker", "/private/var/vm"];
+    mount == "/" || (!SKIP.iter().any(|p| mount.starts_with(p)) && std::path::Path::new(mount).is_dir())
 }
 
 fn service_user() -> String {

@@ -14,17 +14,17 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{install, run, uninstall};
+pub use windows::{install, installed_at, run, uninstall};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{install, run, uninstall};
+pub use macos::{install, installed_at, run, uninstall};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
-pub use linux::{install, run, uninstall};
+pub use linux::{install, installed_at, run, uninstall};
 
 /// `gangli install` options.
 pub struct InstallOpts {
@@ -45,25 +45,97 @@ fn belongs_to_gangli(name: &str) -> bool {
     n.starts_with("gangli") || n == ".ds_store" || n == "desktop.ini"
 }
 
+/// Files in gangli's folder that are not gangli's (a few names).
+fn strangers(dir: &Path) -> io::Result<Vec<String>> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !belongs_to_gangli(n))
+        .take(3)
+        .collect())
+}
+
+/// True when gangli's folder holds only gangli's files: the service can run from it.
+pub fn folder_is_own() -> bool {
+    crate::paths::dev_override().is_some() || strangers(&crate::paths::exe_dir()).is_ok_and(|s| s.is_empty())
+}
+
+/// Where `install --to` puts gangli by default: a folder of its own, where services usually live.
+pub fn default_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into())).join("gangli")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/usr/local/gangli")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        PathBuf::from("/opt/gangli")
+    }
+}
+
+/// `gangli install --to DIR`: copy this binary (and the node identity it may already have) into DIR, a
+/// folder of its own, and install the service from there. One elevation prompt for all of it.
+pub fn install_to(dir: &Path, o: &InstallOpts) -> io::Result<()> {
+    let here = crate::paths::exe_dir();
+    if std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&here).ok() {
+        return install(o);
+    }
+    crate::elevate::ensure_root()?;
+    std::fs::create_dir_all(dir)?;
+    if let Ok(s) = strangers(dir) {
+        if !s.is_empty() {
+            return Err(other(format!("{} also holds other files ({}…): pick an empty folder", dir.display(), s.join(", "))));
+        }
+    }
+    let target = dir.join(if cfg!(windows) { "gangli.exe" } else { "gangli" });
+    std::fs::copy(std::env::current_exe()?, &target).map_err(|e| {
+        other(format!("cannot copy gangli to {} ({e}); if a service already runs from there, uninstall it first", target.display()))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+    }
+    // Same machine, same identity: a node run by hand here keeps its name and networks.
+    let node = crate::paths::node_file();
+    if node.exists() && !dir.join("gangli.node").exists() {
+        std::fs::copy(&node, dir.join("gangli.node"))?;
+    }
+    let mut c = std::process::Command::new(&target);
+    c.arg("install");
+    if let Some(code) = &o.code {
+        c.args(["--code", code]);
+    }
+    if let Some(u) = &o.user {
+        c.args(["--user", u]);
+    }
+    if let Some(p) = &o.password {
+        c.args(["--password", p]);
+    }
+    let st = c.status()?;
+    if !st.success() {
+        return Err(other(format!("the install from {} failed", dir.display())));
+    }
+    Ok(())
+}
+
 /// Checks the folder, records the settings and the code, locks the folder down. Returns the binary.
 pub(crate) fn prepare_install(o: &InstallOpts) -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = crate::paths::exe_dir();
     if crate::paths::dev_override().is_none() {
-        let strangers: Vec<String> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| !belongs_to_gangli(n))
-            .take(3)
-            .collect();
+        let strangers = strangers(&dir)?;
         if !strangers.is_empty() {
             return Err(other(format!(
                 "{} also holds other files ({}…). The service runs gangli from its folder, which then becomes \
-                 writable by administrators only: move gangli into a folder of its own (for example {}) and \
-                 install from there",
+                 writable by administrators only: install with `gangli install --to \"{}\"` (a copy goes there), \
+                 or move gangli into a folder of its own",
                 dir.display(),
                 strangers.join(", "),
-                if cfg!(windows) { r"C:\gangli" } else { "/opt/gangli" }
+                default_dir().display()
             )));
         }
     }

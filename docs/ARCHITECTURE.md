@@ -300,6 +300,10 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   service account) only, `gangli.console` still the installing user's. `--user NAME` runs the service as
   that account (Windows also `--password`). `uninstall` gives the folder back and keeps the
   identity (delete the folder to remove everything).
+- `gangli install --to DIR` (what the GUI does when gangli sits in a shared folder such as Downloads): one
+  elevation, then gangli copies itself (and its `gangli.node`, if it already ran as a node) into DIR and
+  installs from there; default DIR `%ProgramFiles%\gangli`, `/opt/gangli`, `/usr/local/gangli`. Verified on
+  Linux (WSL, systemd) 2026-11-20.
 - Elevation is requested by the binary itself, one prompt: Windows UAC (relaunch hidden, its output relayed
   into the same terminal), macOS `osascript … with administrator privileges`, Linux `pkexec` then `sudo`.
 - `gangli join` / `leave` / `status` change the node state file under a cross-process lock (elevated only
@@ -330,13 +334,38 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 
 ## 12. GUI, tray, local API, LLM agents
 
-- **Native GUI** (egui / eframe) **[decided: native, not browser]**, one window, unified:
-  - *This computer* (node): public code (typed or embedded), start / stop, install / uninstall the service,
-    networks and admission state;
-  - *Networks* (console): create a network (shows public and private codes, QR), add one with a private
-    code, `pack` binaries for relatives;
-  - *Machines* (console): live list, inventory, buttons ssh / terminal / PuTTY / forward / SOCKS;
-  - *API tokens*.
+- **Native GUI** (egui) **[decided: native, not browser]** (`src/gui/`), one window, unified, Italian or
+  English (from the system, `GANGLI_LANG`, or the IT/EN button). `gangli gui`, or a double click (Windows:
+  the console window made for the double click is released; Linux / macOS: started without a terminal):
+  - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, since / last seen),
+    filter; a machine's panel: open it with each launcher (PuTTY, OpenSSH, WinSCP…) as a chosen user and
+    optionally in a persistent terminal, copy the gateway password or an `ssh` command line, its persistent
+    terminals (open / close), its tunnels (add), inventory, signed update from a release folder, forget;
+  - *Networks*: create (dialog with the public code, and the private one hidden until asked), codes, add one
+    with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
+    embedded next to it, for a relative;
+  - *Tunnels*: list with on / off and state, add, remove;
+  - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
+  - *API*: on / off, tokens (made here, shown once; revoke);
+  - *This computer* (node): memberships and admission, join with a public code (prefilled when embedded),
+    run the node inside the window, install as a service (with `--to` when the folder is shared), the
+    installed service and uninstall; the files gangli keeps. A binary with an embedded code and no console
+    network opens on this page.
+- The GUI **is** a console: it opens one in its process (owning the local port, the gateway, the tunnels).
+  If a console is already open in the folder: a GUI there is brought up instead (`GuiShow` over the local
+  API, the second process exits), a `gangli console run` is used through its local API.
+- Backends: eframe (winit + OpenGL) and tray-icon on Windows and macOS. Linux (static binary, no system
+  libraries): X11 in pure Rust (x11rb's own connection; XWayland on Wayland desktops), egui drawn by a CPU
+  rasterizer into PutImage strips, keyboard from the server keymap (AltGr levels, reloaded on
+  MappingNotify), CLIPBOARD both ways, cursor font, `Xft.dpi` scale; tray as a StatusNotifierItem over
+  D-Bus (ksni). Without a tray host (bare X, WSLg) closing the window quits.
+- Tests: `GANGLI_GUI_SCREENSHOT=file.png` (+ `GANGLI_GUI_SCREENSHOT_AFTER`, `GANGLI_GUI_PAGE`) saves the
+  window as drawn and quits (both backends); `GANGLI_GUI_TEST_TRAY=1` closes the window at 2 s and opens it
+  from the tray at 5 s, logging the window state (Windows: as the system sees it); `scripts/tray-test.py`
+  is a StatusNotifier watcher + host that prints gangli's tray and clicks its menu; `scripts/gui-drive.sh`
+  drives the Linux GUI with xdotool. Verified 2026-11-20: Linux in WSLg (clicks, typing with accents / `@`
+  / `€`, copy and paste both ways, tray menu over D-Bus, close to tray and back, second instance, GUI on a
+  `console run`), Windows (pages, close to tray and back). macOS: builds on build-box, not run yet.
 - **Link quality in the GUI**: every machine shows whether its traffic goes **direct** (hole-punching worked)
   or through a **relay** (slower, rate limited on the public relays), with the RTT; the CLI has the same in
   the `LINK` column.
@@ -364,8 +393,9 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   libraries, so the GUI speaks the protocols itself: X11 through `x11rb`'s pure-Rust connection (also
   XWayland on Wayland desktops), egui drawn by a CPU renderer into an X11 image, keyboard from the X11
   keymap, tray through `ksni` (pure-Rust D-Bus). No winit / GL on Linux; Windows and macOS use eframe
-  normally. **[verify]** in phase 6. Tested headless on build-box's Ubuntu runner
-  under Xvfb (window up, screenshot back in the encrypted result) once the rest of the phase is done.
+  normally. Verified in WSLg (section 12); the binary stays fully static (`static-pie linked`).
+- Quick local builds for checks: `scripts/wsl-build.sh` in WSL (Linux musl static, Windows gnu), see AGENTS.md;
+  releases still come from build-box.
 - Built on the owner's blind build machine `mefistofelix/build-box`; see AGENTS.md.
 
 ## 14. Libraries (researched 2026-11)
@@ -381,7 +411,7 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 | Directory | `pkarr` 9 (Mainline DHT + HTTP relays), `chacha20poly1305` | 1.5M downloads; RustCrypto AEAD, 120M downloads |
 | Tray | `tray-icon` (Windows, macOS), `ksni` (Linux) | no GTK linking |
 | Service | `windows-service`, launchd plist, systemd unit | |
-| GUI | `eframe` / `egui` | |
+| GUI | `egui` 0.37; `eframe` on Windows / macOS; `x11rb` + own CPU renderer on Linux | no GL or X11 library linked on Linux |
 | Async | `tokio` | |
 | macOS re-sign | `apple-codesign` | for `pack` |
 
@@ -404,5 +434,6 @@ called for core features.
 4. SSH gateway, sessions as users (Windows tokens, Unix uid), SFTP, saved tunnels, launchers. ✓
 5. Resumable streams; `exec` and jobs; own relays; directory pages; signed self-update; persistent terminals
    with state sync. ✓
-6. GUI with tray (node + console unified, integrated terminal with predictive echo), API tokens in the GUI.
-7. Later: public code rotation, update rollback.
+6. GUI with tray (node + console unified), API tokens in the GUI. ✓
+7. Next: integrated terminal in the GUI (alacritty_terminal screen, predictive echo); later public code
+   rotation, update rollback.

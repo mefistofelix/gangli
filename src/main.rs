@@ -8,6 +8,7 @@ mod console_cmd;
 mod directory;
 mod elevate;
 mod embed;
+mod gui;
 mod http;
 mod inventory;
 mod ipc;
@@ -57,6 +58,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// The window: machines, networks, tunnels, this computer (also what a double click opens).
+    Gui,
     /// node: run the node now as this user, no install (uses the embedded public code by default).
     Node {
         /// Public network code.
@@ -74,6 +77,9 @@ enum Command {
         /// The account's password (Windows only, for the service manager).
         #[arg(long)]
         password: Option<String>,
+        /// Copy gangli into this folder of its own first and install from there (e.g. from Downloads).
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
     },
     /// node: stop and remove the service and its state (one elevation prompt).
     Uninstall,
@@ -376,12 +382,14 @@ fn main() {
     let cli = Cli::parse_from(args);
     let json = cli.json;
     let result: anyhow::Result<()> = match cli.command {
+        None if gui::started_from_desktop() => gui::run(),
+        Some(Command::Gui) => gui::run(),
         None => {
             println!("{}", version_line());
             if embed::embedded_code().is_some() {
                 println!("this binary carries a network code: `gangli node` to start, `gangli install` to install");
             }
-            println!("run `gangli --help` for the commands");
+            println!("`gangli gui` opens the window; `gangli --help` lists the commands");
             Ok(())
         }
         Some(Command::Version) => {
@@ -393,12 +401,18 @@ fn main() {
             Ok(())
         }
         Some(Command::Node { code }) => node_cmd::run(code),
-        Some(Command::Install { code, user, password }) => {
+        Some(Command::Install { code, user, password, to }) => {
             let code = code.or_else(embed::embedded_code);
             match code.as_deref().map(code::decode) {
                 Some(Err(e)) => Err(e),
                 Some(Ok(code::Code::Private { .. })) => Err(anyhow::anyhow!("that is a private code: never put it on a managed machine")),
-                _ => service::install(&service::InstallOpts { code, user, password }).map_err(io_err),
+                _ => {
+                    let o = service::InstallOpts { code, user, password };
+                    match to {
+                        Some(dir) => service::install_to(&dir, &o).map_err(io_err),
+                        None => service::install(&o).map_err(io_err),
+                    }
+                }
             }
         }
         Some(Command::Uninstall) => service::uninstall().map_err(io_err),

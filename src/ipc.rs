@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::inventory::Inventory;
 use crate::proto::PathInfo;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum IpcOp {
     Status,
@@ -48,6 +48,8 @@ pub enum IpcOp {
     JobKill { node: String, job: String },
     Update { nodes: Vec<String>, from: String },
     DebugDrop { node: String },
+    /// Bring the GUI window of this console up (a second `gangli` was started in the folder).
+    GuiShow,
     Stop,
 }
 
@@ -64,7 +66,7 @@ impl IpcOp {
             // They show passwords.
             IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } | IpcOp::Update { .. } => Some("admin"),
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::DebugDrop { .. } => None,
-            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop => None,
+            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop | IpcOp::GuiShow => None,
         }
     }
 }

@@ -180,6 +180,9 @@ pub struct Console {
     saved_at: Mutex<Option<SystemTime>>,
     /// Running tunnels: name → (definition, listener task).
     tunnels: Mutex<HashMap<String, (Tunnel, tokio::task::JoinHandle<()>)>>,
+    /// A GUI window owns this console: another `gangli` started here asks it to come up.
+    pub gui: std::sync::atomic::AtomicBool,
+    pub gui_show: Notify,
 }
 
 #[derive(Clone)]
@@ -256,6 +259,8 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         stop: Notify::new(),
         saved_at: Mutex::new(store::modified(&path())),
         tunnels: Mutex::default(),
+        gui: Default::default(),
+        gui_show: Notify::new(),
     });
     let router = Router::builder(ep).accept(proto::ALPN, Handler { c: c.clone() }).spawn();
     let _ = c.router.set(router);
@@ -1479,6 +1484,13 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let conn = c.live_conn(&id).ok_or_else(|| anyhow!("no live session with {node}"))?;
             conn.close(0u32.into(), b"debug drop");
             Ok(json!({ "dropped": node }))
+        }
+        IpcOp::GuiShow => {
+            let gui = c.gui.load(std::sync::atomic::Ordering::SeqCst);
+            if gui {
+                c.gui_show.notify_one();
+            }
+            Ok(json!({ "shown": gui }))
         }
         IpcOp::Stop => {
             c.stop.notify_one();

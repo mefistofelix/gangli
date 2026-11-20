@@ -70,19 +70,31 @@ src/cert.rs code.rs   certificates; public / private network codes and derived s
 src/state.rs store.rs node state (system or user folder); locked owner-only JSON files
 src/inventory.rs      what a node reports (sysinfo)
 src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec/sudo)
-src/service/          system service per OS (SCM, launchd, systemd)
+src/service/          system service per OS (SCM, launchd, systemd); install --to
+src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the
+                      open one), native.rs (eframe + tray-icon: Windows, macOS), x11.rs + raster.rs + sni.rs
+                      (Linux: X11 protocol, CPU renderer, D-Bus tray), icon.rs, tr.rs (it/en), png.rs
 docs/ARCHITECTURE.md  design and decisions
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
 scripts/remote-build.sh  builds the three OSes on build-box and publishes a release
 scripts/box-build.sh     what runs on the build machine (one target OS per run)
+scripts/wsl-build.sh     quick local build in WSL (Linux musl, Windows gnu) into out/wsl/, for checks
+scripts/gui-drive.sh     drives the Linux GUI with xdotool (WSLg) for tests
+scripts/tray-test.py     a StatusNotifier watcher + host: prints gangli's Linux tray, clicks its menu
 .tools/               git-ignored: build-box clone, box-password, release signing key
 ```
 
 ## Building
 
-There is no local Rust toolchain on the owner's Windows PC; builds happen on the owner's **public blind build
-machine `mefistofelix/build-box`** (GitHub Actions, free on public repositories; its README.md and AGENTS.md
-explain it). From the project root in Git Bash:
+There is no Rust toolchain on the owner's Windows side. **Quick checks** build locally in the owner's WSL (Ubuntu,
+the default user: rustup with the `x86_64-unknown-linux-musl` and `x86_64-pc-windows-gnu` targets, musl-tools,
+mingw-w64; root is available for tests): `wsl.exe -d Ubuntu --cd <project in /mnt/c> -- bash scripts/wsl-build.sh
+[linux] [windows] [--build N] [--sign] [--test]` (from Git Bash set `MSYS_NO_PATHCONV=1`; a full build takes about
+a minute and a half, an incremental one seconds; outputs in `out/wsl/`). Prefer it to build-box while working.
+
+**Releases** (and the macOS build) happen on the owner's **public blind build machine `mefistofelix/build-box`**
+(GitHub Actions, free on public repositories; its README.md and AGENTS.md explain it). From the project root in
+Git Bash:
 
 ```bash
 bash scripts/remote-build.sh            # build linux + windows + macos, publish release build-N
@@ -116,3 +128,8 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
 - Network behaviour (drops, slow links) is tested with an in-process loss/latency shim on the resumable stream
   layer, not only by hand.
 - Before a release that touches install / service code, try install → join → uninstall on all three OSes.
+- GUI (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
+  gangli gui` saves the window as drawn and quits (read the PNG to check it); `GANGLI_GUI_TEST_TRAY=1` checks
+  close-to-tray and reopen; `scripts/tray-test.py` stands in for a desktop tray on Linux; `scripts/gui-drive.sh`
+  clicks and types with xdotool. In WSL use another console port than the Windows side (`[console] port`):
+  WSL2 forwards localhost, so both cannot own 7373.

@@ -76,3 +76,11 @@ fn run_ok(cmd: &str, args: &[&str]) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The binary the installed gangli service runs, if there is one (from any folder).
+pub fn installed_at() -> Option<std::path::PathBuf> {
+    let plist = std::fs::read_to_string(plist_path()).ok()?;
+    let after = plist.split("<key>ProgramArguments</key>").nth(1)?;
+    let bin = after.split("<string>").nth(1)?.split("</string>").next()?;
+    Some(bin.into())
+}

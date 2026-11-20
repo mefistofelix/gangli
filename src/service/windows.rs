@@ -134,3 +134,17 @@ fn run_service() -> io::Result<()> {
 fn to_io<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::other(e.to_string())
 }
+
+/// The binary the installed gangli service runs, if there is one (from any folder).
+pub fn installed_at() -> Option<std::path::PathBuf> {
+    use windows_service::service::ServiceAccess;
+    let m = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let s = m.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG).ok()?;
+    let path = s.query_config().ok()?.executable_path.to_string_lossy().to_string();
+    // The command line: "C:\…\gangli.exe" run --service
+    let bin = match path.strip_prefix('"') {
+        Some(rest) => rest.split('"').next()?.to_string(),
+        None => path.split(" run").next()?.trim().to_string(),
+    };
+    Some(bin.into())
+}

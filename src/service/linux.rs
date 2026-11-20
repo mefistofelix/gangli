@@ -66,3 +66,15 @@ fn run_ok(cmd: &str, args: &[&str]) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The binary the installed gangli service runs, if there is one (from any folder).
+pub fn installed_at() -> Option<std::path::PathBuf> {
+    let unit = std::fs::read_to_string(unit_path()).ok()?;
+    let line = unit.lines().find(|l| l.starts_with("ExecStart="))?;
+    let rest = line.trim_start_matches("ExecStart=").trim();
+    let bin = match rest.strip_prefix('"') {
+        Some(r) => r.split('"').next()?,
+        None => rest.split_whitespace().next()?,
+    };
+    Some(bin.into())
+}

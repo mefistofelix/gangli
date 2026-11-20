@@ -434,20 +434,25 @@ pub fn job_output(node: &str, job: &str, follow: bool, json: bool) -> Result<()>
 
 pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
     let v = ipc::call(IpcOp::Update { nodes, from })?;
+    let list = v.as_array().cloned().unwrap_or_default();
+    // Exit code 3 when some machine was not updated (scripts and agents can tell).
+    let failed = list.iter().any(|r| r["ok"].as_bool() != Some(true));
     if json {
         print_json(&v);
-        return Ok(());
-    }
-    let list = v.as_array().cloned().unwrap_or_default();
-    if list.is_empty() {
-        println!("no machine online to update");
-    }
-    for r in list {
-        if r["ok"].as_bool() == Some(true) {
-            println!("{:<16} updating: {}", r["node"].as_str().unwrap_or(""), r["asset"].as_str().unwrap_or(""));
-        } else {
-            println!("{:<16} not updated: {}", r["node"].as_str().unwrap_or(""), r["error"].as_str().unwrap_or(""));
+    } else {
+        if list.is_empty() {
+            println!("no machine online to update");
         }
+        for r in &list {
+            if r["ok"].as_bool() == Some(true) {
+                println!("{:<16} updating: {}", r["node"].as_str().unwrap_or(""), r["asset"].as_str().unwrap_or(""));
+            } else {
+                println!("{:<16} not updated: {}", r["node"].as_str().unwrap_or(""), r["error"].as_str().unwrap_or(""));
+            }
+        }
+    }
+    if failed {
+        std::process::exit(3);
     }
     Ok(())
 }
