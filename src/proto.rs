@@ -128,7 +128,7 @@ pub enum Req {
     JobOutput { id: String, from: u64 },
     JobKill { id: String },
     /// Console → node: a new binary follows (`size` raw bytes after this frame), signed with the release key.
-    Update { size: u64, sig: String },
+    Update { size: u64 },
     /// Console → node, inside a `Stream`: attach to the persistent terminal `name` (started if missing).
     Attach { name: String, user: String, cols: u16, rows: u16 },
     TermList,

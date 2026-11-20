@@ -294,16 +294,14 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   the user, access limited to that user, no elevation.
 - `gangli install [--code CODE]` registers the service on **the binary where it is** (no copy elsewhere),
   same `gangli.node`, so the node keeps its identity: SCM service (Windows, LocalSystem), systemd unit
-  (Linux), LaunchDaemon (macOS). Because the service runs as SYSTEM / root, the folder must not be writable
-  by ordinary users (anyone could swap the binary): install requires a folder of its own (e.g. `C:\gangli`,
-  `/opt/gangli`) and makes it writable by administrators only, `gangli.node` readable by them (and the
-  service account) only, `gangli.console` still the installing user's. `--user NAME` runs the service as
-  that account (Windows also `--password`). `uninstall` gives the folder back and keeps the
-  identity (delete the folder to remove everything).
-- `gangli install --to DIR` (what the GUI does when gangli sits in a shared folder such as Downloads): one
-  elevation, then gangli copies itself (and its `gangli.node`, if it already ran as a node) into DIR and
-  installs from there; default DIR `%ProgramFiles%\gangli`, `/opt/gangli`, `/usr/local/gangli`. Verified on
-  Linux (WSL, systemd) 2026-11-20.
+  (Linux), LaunchDaemon (macOS). **[decided 2026-11-20]** Choosing the folder and its permissions is the
+  job of whoever installs: the service runs as SYSTEM / root, so a folder ordinary users can write to lets
+  them swap the binary (a folder of its own such as `C:\gangli`, `/opt/gangli`, writable by administrators
+  only, is the sensible choice). gangli checks nothing and changes no folder permission; it only makes
+  `gangli.node` (the node key) readable by the service alone (SYSTEM + Administrators, root, or the
+  `--user` account) and gives it back on `uninstall`. `--user NAME` runs the service as that account
+  (Windows also `--password`). `uninstall` keeps the identity (delete the folder to remove everything).
+  The GUI's "Install as a service" runs the same `install`.
 - Elevation is requested by the binary itself, one prompt: Windows UAC (relaunch hidden, its output relayed
   into the same terminal), macOS `osascript … with administrator privileges`, Linux `pkexec` then `sudo`.
 - `gangli join` / `leave` / `status` change the node state file under a cross-process lock (elevated only
@@ -320,16 +318,17 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 
 ## 11. Updates (`update.rs`)
 
-- The owner's **release key** (Ed25519) is made once with `gangli release keygen --out .tools/release.key`
-  (its public half goes in `.tools/release.pub`); `scripts/remote-build.sh` builds the public half into every
-  binary (`GANGLI_RELEASE_PUB`) and signs every release binary (`<asset>.sig`). Development builds have no key
-  and refuse updates.
+- **No release signature** **[decided 2026-11-20]**: only the consoles of the network (the owners) can send
+  an update, and they can already run anything on the machine, so a signature on top would add a key to
+  keep and nothing more. Trust in the binary itself is the OS's business (SmartScreen / Gatekeeper ask the
+  first time) and the user's.
 - `gangli update [machines…] --from <folder>` (a folder with a release, e.g. `gh release download build-N`):
-  the console picks each machine's binary by platform and architecture (from its inventory), checks the
-  signature itself, and sends it over the session. The node checks it against its built-in key, renames the
-  running binary to `gangli….old`, puts the new one in place and restarts: the service manager starts it
-  again (systemd `Restart=always`, launchd `KeepAlive`, the Windows recovery action set by `install`), a node
-  run by hand starts the new binary itself. The `.old` file is removed at the next start.
+  the console picks each machine's binary by platform and architecture (from its inventory) and sends it
+  over the session. The node checks that it is an executable for its own platform and architecture (PE,
+  ELF with the right machine, Mach-O), renames the running binary to `gangli….old`, puts the new one in place
+  and restarts: the service manager starts it again (systemd `Restart=always`, launchd `KeepAlive`, the
+  Windows recovery action set by `install`), a node run by hand starts the new binary itself. The `.old` file
+  is removed at the next start.
 - Not yet: automatic rollback if the new version does not come back.
 
 ## 12. GUI, tray, local API, LLM agents
@@ -340,7 +339,7 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, since / last seen),
     filter; a machine's panel: a **terminal inside the window** ("Terminal here"), or each launcher (PuTTY,
     OpenSSH, WinSCP…), as a chosen user and optionally in a persistent terminal; copy the gateway password or an `ssh` command line, its persistent
-    terminals (open / close), its tunnels (add), inventory, signed update from a release folder, forget;
+    terminals (open / close), its tunnels (add), inventory, update from a release folder, forget;
   - *Networks*: create (dialog with the public code, and the private one hidden until asked), codes, add one
     with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
     embedded next to it, for a relative;
@@ -348,7 +347,7 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
   - *API*: on / off, tokens (made here, shown once; revoke);
   - *This computer* (node): memberships and admission, join with a public code (prefilled when embedded),
-    run the node inside the window, install as a service (with `--to` when the folder is shared), the
+    run the node inside the window, install as a service (the same `gangli install`, from where it is), the
     installed service and uninstall; the files gangli keeps. A binary with an embedded code and no console
     network opens on this page.
 - **Integrated terminal** (`gui/term.rs`, when the console lives in the window): tabs of shells or persistent
@@ -406,8 +405,8 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   XWayland on Wayland desktops), egui drawn by a CPU renderer into an X11 image, keyboard from the X11
   keymap, tray through `ksni` (pure-Rust D-Bus). No winit / GL on Linux; Windows and macOS use eframe
   normally. Verified in WSLg (section 12); the binary stays fully static (`static-pie linked`).
-- Quick local builds for checks: `scripts/wsl-build.sh` in WSL (Linux musl static, Windows gnu), see AGENTS.md;
-  releases still come from build-box.
+- No local builds: everything is built on build-box and checked with its binaries; `remote-build.sh --test`
+  also runs an end-to-end test (service install, exec, GUI screenshot, update, uninstall) on each runner.
 - Built on the owner's blind build machine `mefistofelix/build-box`; see AGENTS.md.
 
 ## 14. Libraries (researched 2026-11)
@@ -444,7 +443,7 @@ called for core features.
 3. iroh, networks as keys, public / private codes, directory on pkarr, certificates, live sessions,
    inventory push, node without install, embedded code, one-shot or open console. ✓
 4. SSH gateway, sessions as users (Windows tokens, Unix uid), SFTP, saved tunnels, launchers. ✓
-5. Resumable streams; `exec` and jobs; own relays; directory pages; signed self-update; persistent terminals
+5. Resumable streams; `exec` and jobs; own relays; directory pages; self-update; persistent terminals
    with state sync. ✓
 6. GUI with tray (node + console unified), API tokens in the GUI. ✓
 7. Integrated terminal in the GUI, with predictive echo. ✓ Later: public code rotation, update rollback.

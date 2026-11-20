@@ -63,7 +63,7 @@ src/proc.rs           node: shell / command with ConPTY or /dev/ptmx, as system 
 src/sftp.rs           SFTP v3 server, run by the node as `gangli sftp-server` in the user's process
 src/resume.rs         resumable streams (sessions, forwards survive drops)
 src/term.rs           persistent terminals (alacritty_terminal screen, redraw, state sync)
-src/update.rs         release key, signatures, verified self-update
+src/update.rs         self-update (platform check, swap, restart)
 src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
 src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
 src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers
@@ -71,7 +71,7 @@ src/cert.rs code.rs   certificates; public / private network codes and derived s
 src/state.rs store.rs node state (system or user folder); locked owner-only JSON files
 src/inventory.rs      what a node reports (sysinfo)
 src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec/sudo)
-src/service/          system service per OS (SCM, launchd, systemd); install --to
+src/service/          system service per OS (SCM, launchd, systemd)
 src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the
                       open one), native.rs (eframe + tray-icon: Windows, macOS), x11.rs + raster.rs + sni.rs
                       (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), autostart.rs (login item), icon.rs,
@@ -80,27 +80,23 @@ docs/ARCHITECTURE.md  design and decisions
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
 scripts/remote-build.sh  builds the three OSes on build-box and publishes a release
 scripts/box-build.sh     what runs on the build machine (one target OS per run)
-scripts/wsl-build.sh     quick local build in WSL (Linux musl, Windows gnu) into out/wsl/, for checks
+scripts/box-test.sh      end-to-end test on the build machine (service, console, exec, GUI, update)
 scripts/gui-drive.sh     drives the Linux GUI with xdotool (WSLg) for tests
 scripts/tray-test.py     a StatusNotifier watcher + host: prints gangli's Linux tray, clicks its menu
-.tools/               git-ignored: build-box clone, box-password, release signing key
+.tools/               git-ignored: build-box clone, box-password
 ```
 
 ## Building
 
-There is no Rust toolchain on the owner's Windows side. **Quick checks** build locally in the owner's WSL (Ubuntu,
-the default user: rustup with the `x86_64-unknown-linux-musl` and `x86_64-pc-windows-gnu` targets, musl-tools,
-mingw-w64; root is available for tests): `wsl.exe -d Ubuntu --cd <project in /mnt/c> -- bash scripts/wsl-build.sh
-[linux] [windows] [--build N] [--sign] [--test]` (from Git Bash set `MSYS_NO_PATHCONV=1`; a full build takes about
-a minute and a half, an incremental one seconds; outputs in `out/wsl/`). Prefer it to build-box while working.
-
-**Releases** (and the macOS build) happen on the owner's **public blind build machine `mefistofelix/build-box`**
-(GitHub Actions, free on public repositories; its README.md and AGENTS.md explain it). From the project root in
-Git Bash:
+**No local builds** **[decided 2026-11-20]**: builds happen only on the owner's **public blind build machine
+`mefistofelix/build-box`** (GitHub Actions, free on public repositories; its README.md and AGENTS.md explain it),
+and things are verified with the binaries it produces (in `out/box-<os>/` and `out/release/`). From the project
+root in Git Bash:
 
 ```bash
 bash scripts/remote-build.sh            # build linux + windows + macos, publish release build-N
 bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os>/
+bash scripts/remote-build.sh --test     # also run scripts/box-test.sh on each runner; a failure stops the release
 ```
 
 - The working tree (tracked and new files, not the ignored ones) is staged with a `build.sh` calling
@@ -110,13 +106,12 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
   `macos-latest` (universal, ad-hoc signed).
 - Toolchains (rustup, zig, cargo-zigbuild) and the target dir are kept in `$CACHE`, per OS.
 - Logs come back in `out/box-<os>/build.log`.
-- Release key: `.tools/release.key` (secret, git-ignored, never print it) and `.tools/release.pub`; made once
-  with `gangli release keygen`. With them the build bakes the public half in and signs every binary.
-- Builds hit GitHub's API limit (5000 requests / hour; box.sh polls): batch changes, build rarely.
+- Builds hit GitHub's API limit (5000 requests / hour; box.sh polls) and runner minutes (macOS above all): batch
+  changes, build rarely, keep `--test` runs short.
 - Push HEAD before a release build (the script checks it). The release `build-N` (N = newest + 1, also the
   version `0.0.N` baked into the binary through `GANGLI_BUILD`) of this **private** repository gets
   `gangli-linux-x86_64`, `gangli-linux-aarch64`, `gangli-windows-x86_64.exe`, `gangli-macos-universal` and
-  `SHA256SUMS`.
+  `SHA256SUMS`. The release points at the commit that was built.
 
 ## Testing
 
@@ -129,8 +124,10 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
   goes through the real n0 relays, pkarr relays and the DHT. Close the console with `gangli console stop`.
 - Network behaviour (drops, slow links) is tested with an in-process loss/latency shim on the resumable stream
   layer, not only by hand.
-- Before a release that touches install / service code, try install → join → uninstall on all three OSes.
-- GUI (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
+- Before a release that touches install / service code: `remote-build.sh --test` (install → online → exec as
+  SYSTEM / root → update → uninstall on the three runners, `out/box-<os>/test.log`, GUI screenshot
+  `out/box-<os>/gui-<os>.png`).
+- GUI, with build-box binaries (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
   gangli gui` saves the window as drawn and quits (read the PNG to check it); `GANGLI_GUI_TEST_TRAY=1` checks
   close-to-tray and reopen; `scripts/tray-test.py` stands in for a desktop tray on Linux; `scripts/gui-drive.sh`
   clicks and types with xdotool. In WSL use another console port than the Windows side (`[console] port`):

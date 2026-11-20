@@ -1441,11 +1441,10 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                     }
                     let asset = crate::update::asset_for(&inv.platform, &inv.arch).ok_or_else(|| anyhow!("no release for {} {}", inv.platform, inv.arch))?;
                     let bytes = tokio::fs::read(dir.join(asset)).await.with_context(|| format!("{asset} not in {from}"))?;
-                    let sig = tokio::fs::read_to_string(dir.join(format!("{asset}.sig"))).await.with_context(|| format!("{asset}.sig not in {from}"))?;
-                    crate::update::verify(&bytes, &sig)?;
+                    crate::update::check(&bytes, &inv.platform, &inv.arch)?;
                     let conn = ensure_live(c, &net, &id).await?;
                     let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
-                    proto::write_frame(&mut send, &Req::Update { size: bytes.len() as u64, sig }).await?;
+                    proto::write_frame(&mut send, &Req::Update { size: bytes.len() as u64 }).await?;
                     send.write_all(&bytes).await.ctx("send")?;
                     let _ = send.finish();
                     match tokio::time::timeout(Duration::from_secs(120), proto::read_frame::<_, Resp>(&mut recv)).await {

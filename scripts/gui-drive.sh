@@ -1,14 +1,15 @@
 #!/bin/bash
 # Drives the Linux GUI under X11 (WSLg or Xvfb) with xdotool, for tests; screenshots with ImageMagick.
 # usage: gui-drive.sh start [lang] | click X Y | dclick X Y | type TEXT | key KEYS | shot NAME [delay] | clip | setclip TEXT | stop
-# The GUI runs from /tmp/gui1 (a console folder made by the test); screenshots go to out/x-NAME.png.
+# The GUI runs from /tmp/gui1 (a console folder made by the test), with the build-box binary (or GANGLI_BIN);
+# screenshots go to out/x-NAME.png.
 export DISPLAY=:0
 R="$(cd "$(dirname "$0")/.." && pwd)"
 WID=$(xdotool search --name '^gangli$' 2>/dev/null | head -1)
 case "$1" in
 start)
   pkill -f "gangli gui"; sleep 0.5
-  cd /tmp/gui1; cp $R/out/wsl/gangli-linux-x86_64 gangli
+  cd /tmp/gui1; cp "${GANGLI_BIN:-$R/out/box-linux/gangli-linux-x86_64}" gangli
   GANGLI_LANG=${2:-it} setsid nohup ./gangli gui > gui.out 2>&1 < /dev/null &
   for i in $(seq 1 40); do sleep 0.25; WID=$(xdotool search --name '^gangli$' 2>/dev/null | head -1); [ -n "$WID" ] && break; done
   sleep 1; xdotool windowmove "$WID" 0 0; echo "window $WID"; xdotool getwindowgeometry "$WID";;

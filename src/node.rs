@@ -484,8 +484,8 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     }
                 }
             }
-            Req::Update { size, sig } if authed => {
-                tokio::spawn(receive_update(send, recv, size, sig));
+            Req::Update { size } if authed => {
+                tokio::spawn(receive_update(send, recv, size));
             }
             Req::TermList if authed => {
                 let terms = crate::term::list().into_iter().map(|(name, user, started, attached)| proto::TermInfo { name, user, started, attached }).collect();
@@ -875,7 +875,7 @@ fn job_output(id: &str, from: u64) -> Result<Resp> {
 }
 
 /// A new binary from a console: verify the release signature, swap, restart.
-async fn receive_update<W, R>(mut send: W, mut recv: R, size: u64, sig: String)
+async fn receive_update<W, R>(mut send: W, mut recv: R, size: u64)
 where
     W: AsyncWrite + Unpin + Send + 'static,
     R: AsyncRead + Unpin + Send + 'static,
@@ -887,7 +887,7 @@ where
         }
         let mut bytes = vec![0u8; size as usize];
         recv.read_exact(&mut bytes).await.ctx("receive the binary")?;
-        crate::update::verify(&bytes, &sig)?;
+        crate::update::check(&bytes, std::env::consts::OS, std::env::consts::ARCH)?;
         Ok(bytes)
     }
     .await;
@@ -895,7 +895,7 @@ where
         Ok(bytes) => {
             let _ = proto::write_frame(&mut send, &Resp::Updating).await;
             let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
-            log_line("verified update received");
+            log_line("update received");
             // Let the answer leave, then swap and restart (does not return on success).
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Err(e) = tokio::task::spawn_blocking(move || crate::update::install_and_restart(&bytes)).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {

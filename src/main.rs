@@ -81,9 +81,6 @@ enum Command {
         /// The account's password (Windows only, for the service manager).
         #[arg(long)]
         password: Option<String>,
-        /// Copy gangli into this folder of its own first and install from there (e.g. from Downloads).
-        #[arg(long)]
-        to: Option<std::path::PathBuf>,
     },
     /// node: stop and remove the service and its state (one elevation prompt).
     Uninstall,
@@ -155,17 +152,14 @@ enum Command {
     /// console: background jobs on a machine: they keep running and keep their output without a console.
     #[command(subcommand)]
     Job(JobCmd),
-    /// console: send the machines a signed new release (from a folder: `gh release download build-N -D <dir>`).
+    /// console: send the machines a new release (from a folder: `gh release download build-N -D <dir>`).
     Update {
         /// Machines (default: every machine online now).
         nodes: Vec<String>,
-        /// Folder with the release binaries and their `.sig` files.
+        /// Folder with the release binaries (gangli-linux-x86_64, gangli-windows-x86_64.exe, …).
         #[arg(long)]
         from: String,
     },
-    /// Release key: make it once, sign releases (used by scripts/remote-build.sh).
-    #[command(subcommand, hide = true)]
-    Release(ReleaseCmd),
     /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
     #[command(hide = true, name = "debug-drop")]
     DebugDrop { node: String },
@@ -221,21 +215,6 @@ enum TermCmd {
     List { node: String },
     /// End a persistent terminal (its shell is killed).
     Kill { node: String, name: String },
-}
-
-#[derive(Subcommand)]
-enum ReleaseCmd {
-    /// Make the release key (prints its public half, to put in .tools/release.pub).
-    Keygen {
-        #[arg(long)]
-        out: std::path::PathBuf,
-    },
-    /// Write `<file>.sig` for each file.
-    Sign {
-        #[arg(long)]
-        key: std::path::PathBuf,
-        files: Vec<std::path::PathBuf>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -405,18 +384,12 @@ fn main() {
             Ok(())
         }
         Some(Command::Node { code }) => node_cmd::run(code),
-        Some(Command::Install { code, user, password, to }) => {
+        Some(Command::Install { code, user, password }) => {
             let code = code.or_else(embed::embedded_code);
             match code.as_deref().map(code::decode) {
                 Some(Err(e)) => Err(e),
                 Some(Ok(code::Code::Private { .. })) => Err(anyhow::anyhow!("that is a private code: never put it on a managed machine")),
-                _ => {
-                    let o = service::InstallOpts { code, user, password };
-                    match to {
-                        Some(dir) => service::install_to(&dir, &o).map_err(io_err),
-                        None => service::install(&o).map_err(io_err),
-                    }
-                }
+                _ => service::install(&service::InstallOpts { code, user, password }).map_err(io_err),
             }
         }
         Some(Command::Uninstall) => service::uninstall().map_err(io_err),
@@ -482,8 +455,6 @@ fn main() {
             JobCmd::Kill { node, job } => console_cmd::job(ipc::IpcOp::JobKill { node, job }, json),
         },
         Some(Command::Update { nodes, from }) => console_cmd::update(nodes, from, json),
-        Some(Command::Release(ReleaseCmd::Keygen { out })) => update::keygen(&out).map(|p| println!("{p}")),
-        Some(Command::Release(ReleaseCmd::Sign { key, files })) => update::sign(&key, &files),
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
     };
     if let Err(e) = result {

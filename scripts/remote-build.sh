@@ -5,12 +5,16 @@
 # staged with a build.sh that runs scripts/box-build.sh, and box.sh sends it encrypted with the password in
 # .tools/box-password (the secret BOX_PASSWORD of build-box). The three OSes build in parallel; logs come back
 # in out/box-<os>/build.log. Run from the project root in Git Bash.
-# usage: bash scripts/remote-build.sh [--no-release] [--only "linux windows macos"]
+# With --test each runner also runs scripts/box-test.sh on what it built (service install, console, exec, GUI
+# screenshot, update, uninstall); a failed test stops the release.
+# usage: bash scripts/remote-build.sh [--no-release] [--test] [--only "linux windows macos"]
 set -e
-RELEASE=1; ONLY="linux windows macos"
+RELEASE=1; TEST=0; ONLY="linux windows macos"
 while [ $# -gt 0 ]; do
-  case "$1" in --no-release) RELEASE=0; shift;; --only) ONLY="$2"; shift 2;; *) echo "unknown option $1"; exit 2;; esac
+  case "$1" in --no-release) RELEASE=0; shift;; --test) TEST=1; shift;; --only) ONLY="$2"; shift 2;; *) echo "unknown option $1"; exit 2;; esac
 done
+# the release points at the commit built now, whatever happens to HEAD meanwhile
+COMMIT=$(git rev-parse HEAD)
 [ -f .tools/build-box/box.sh ] || git clone -q https://github.com/mefistofelix/build-box .tools/build-box
 [ -f .tools/box-password ] || { echo "missing .tools/box-password"; exit 2; }
 if [ "$RELEASE" = 1 ]; then
@@ -45,13 +49,16 @@ for OS in $ONLY; do cp out/box-$OS/gangli-* out/release/; done
 # keep the lock file the build resolved (same on every OS for the same tree)
 for OS in $ONLY; do [ -f out/box-$OS/Cargo.lock ] && cp out/box-$OS/Cargo.lock Cargo.lock && break; done
 (cd out/release && sha256sum gangli-* > SHA256SUMS)
-# sign every binary with the owner's release key (.tools/release.key), using the binary for this computer
-if [ -f .tools/release.key ]; then
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) HOSTBIN=out/release/gangli-windows-x86_64.exe;; Darwin) HOSTBIN=out/release/gangli-macos-universal;; *) HOSTBIN=out/release/gangli-linux-$(uname -m);; esac
-  if [ -x "$HOSTBIN" ] || [ -f "$HOSTBIN" ]; then "$HOSTBIN" release sign --key .tools/release.key out/release/gangli-*[!g] && echo "signed"; fi
+if [ "$TEST" = 1 ]; then
+  echo "tests:"; TFAIL=0
+  for OS in $ONLY; do
+    R=$(tail -1 out/box-$OS/test.log 2>/dev/null || echo "TESTS: no result"); echo "  $OS: $R"
+    echo "$R" | grep -q " 0 failed" || TFAIL=1
+  done
+  [ "$TFAIL" = 0 ] || { echo "tests failed: no release (see out/box-<os>/test.log)"; exit 1; }
 fi
 ls -la out/release
 [ "$RELEASE" = 1 ] || exit 0
-gh release create "build-$N" out/release/* --target "$(git rev-parse HEAD)" --title "gangli build $N" \
-  --notes "Built on build-box from $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)" --latest > /dev/null
+gh release create "build-$N" out/release/* --target "$COMMIT" --title "gangli build $N" \
+  --notes "Built on build-box from ${COMMIT:0:7}: $(git log -1 --pretty=%s "$COMMIT")" --latest > /dev/null
 echo "release build-$N"

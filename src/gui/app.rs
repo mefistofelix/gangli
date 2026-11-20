@@ -81,8 +81,6 @@ struct LocalNode {
     installed: bool,
     /// The binary of the installed service, wherever it is.
     installed_at: Option<PathBuf>,
-    /// This folder holds only gangli: the service can run from here (else `install --to`).
-    own_folder: bool,
     /// gangli starts at login, in the tray.
     autostart: bool,
     read_at: Option<Instant>,
@@ -303,7 +301,6 @@ impl App {
     fn read_node(&mut self) {
         self.node.installed_at = crate::service::installed_at();
         self.node.installed = crate::paths::service_installed() || self.node.installed_at.is_some();
-        self.node.own_folder = crate::service::folder_is_own();
         self.node.autostart = super::autostart::enabled();
         self.node.networks.clear();
         if let Ok(st) = crate::state::load() {
@@ -1138,19 +1135,9 @@ impl App {
                         args.push("--code".into());
                         args.push(code);
                     }
-                    if !self.node.own_folder {
-                        args.push("--to".into());
-                        args.push(crate::service::default_dir().display().to_string());
-                    }
                     self.start_job(None, args);
                 }
             });
-            if !self.node.own_folder {
-                ui.label(RichText::new(trf(
-                    format!("The service gets a copy of gangli in {}, a folder of its own.", crate::service::default_dir().display()),
-                    format!("Il servizio avrà una copia di gangli in {}, una cartella tutta sua.", crate::service::default_dir().display()),
-                )).weak());
-            }
         }
         if busy {
             ui.label(RichText::new(tr("Working… (confirm the system's request)", "In corso… (conferma la richiesta del sistema)")).weak());

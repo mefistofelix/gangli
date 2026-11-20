@@ -6,8 +6,6 @@ set -e
 mkdir -p "$CACHE" "$OUT"
 OS="$(cat build-target)"
 export GANGLI_BUILD="$(cat build-number)"
-# the owner's release key (public half): binaries built with it accept signed updates
-[ -f release-pub ] && export GANGLI_RELEASE_PUB="$(cat release-pub)"
 export CARGO_TARGET_DIR="$CACHE/target"
 export CARGO_HOME="$CACHE/cargo-home"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
@@ -55,3 +53,5 @@ esac
 # the resolved dependency versions come back too (committed: reproducible builds)
 cp Cargo.lock "$OUT/Cargo.lock"
 ls -la "$OUT"
+# end-to-end test of what was just built (scripts/remote-build.sh --test)
+if [ -f build-test ]; then bash scripts/box-test.sh > "$OUT/test.log" 2>&1 || true; tail -1 "$OUT/test.log"; fi
