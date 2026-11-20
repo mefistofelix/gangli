@@ -59,7 +59,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// The window: machines, networks, tunnels, this computer (also what a double click opens).
-    Gui,
+    Gui {
+        /// Start in the tray, without the window (used at login).
+        #[arg(long)]
+        hidden: bool,
+    },
     /// node: run the node now as this user, no install (uses the embedded public code by default).
     Node {
         /// Public network code.
@@ -382,8 +386,8 @@ fn main() {
     let cli = Cli::parse_from(args);
     let json = cli.json;
     let result: anyhow::Result<()> = match cli.command {
-        None if gui::started_from_desktop() => gui::run(),
-        Some(Command::Gui) => gui::run(),
+        None if gui::started_from_desktop() => gui::run(false),
+        Some(Command::Gui { hidden }) => gui::run(hidden),
         None => {
             println!("{}", version_line());
             if embed::embedded_code().is_some() {

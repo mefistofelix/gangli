@@ -282,7 +282,7 @@ impl Win {
     }
 }
 
-pub fn run(client: Client) -> Result<()> {
+pub fn run(client: Client, hidden: bool) -> Result<()> {
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let (c, screen_num) = RustConnection::connect(None).map_err(|e| {
         anyhow!("no X11 display to open the window on (DISPLAY={display:?}: {e}); the commands work without it, see `gangli --help`")
@@ -350,7 +350,9 @@ pub fn run(client: Client) -> Result<()> {
     let cursor_font = c.generate_id()?;
     c.open_font(cursor_font, b"cursor")?;
     let keys = keymap(&c)?;
-    c.map_window(win)?;
+    if !hidden {
+        c.map_window(win)?;
+    }
     c.flush()?;
 
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -386,7 +388,9 @@ pub fn run(client: Client) -> Result<()> {
     };
     let mut model = app.tray_model();
 
-    let mut w = Win { c: c.clone(), win, root: screen.root, gc, depth, a, keys, cursor_font, cursors: HashMap::new(), cursor_now: 0, clip_text: None, mapped: true };
+    let mut w = Win { c: c.clone(), win, root: screen.root, gc, depth, a, keys, cursor_font, cursors: HashMap::new(), cursor_now: 0, clip_text: None, mapped: !hidden };
+    // Started hidden (at login): stay in the tray if there is one, else show the window after a moment.
+    let mut map_unless_tray = hidden.then(|| Instant::now() + Duration::from_secs(3));
     let ctx = egui::Context::default();
     let theme = if std::env::var("GTK_THEME").is_ok_and(|t| t.to_lowercase().contains("dark")) { egui::Theme::Dark } else { egui::Theme::Light };
     let mut raster = Raster::default();
@@ -581,6 +585,14 @@ pub fn run(client: Client) -> Result<()> {
         }
         if test_tray > 0 && test_tray < 3 {
             next_frame = Some(next_frame.map_or(Instant::now() + Duration::from_millis(300), |t| t.min(Instant::now() + Duration::from_millis(300))));
+        }
+        if let Some(t) = map_unless_tray {
+            if tray_ok.load(Ordering::SeqCst) {
+                map_unless_tray = None;
+            } else if Instant::now() >= t {
+                map_unless_tray = None;
+                w.show();
+            }
         }
         app.logic(w.mapped);
         if app.take_show() {

@@ -11,6 +11,7 @@
 //! A second GUI started in the same folder only brings the first one's window up.
 
 mod app;
+mod autostart;
 mod client;
 mod icon;
 mod png;
@@ -74,8 +75,8 @@ pub fn started_from_desktop() -> bool {
     }
 }
 
-/// `gangli gui` (and `gangli` from a desktop).
-pub fn run() -> Result<()> {
+/// `gangli gui` (and `gangli` from a desktop). `hidden`: start in the tray (at login).
+pub fn run(hidden: bool) -> Result<()> {
     // Another GUI open in this folder: bring it up and leave.
     if let Ok(Some(v)) = crate::ipc::call_open(crate::ipc::IpcOp::GuiShow) {
         if v["shown"].as_bool() == Some(true) {
@@ -87,9 +88,9 @@ pub fn run() -> Result<()> {
     tr::init();
     let client = client::Client::start()?;
     #[cfg(any(windows, target_os = "macos"))]
-    return native::run(client);
+    return native::run(client, hidden);
     #[cfg(target_os = "linux")]
-    return x11::run(client);
+    return x11::run(client, hidden);
 }
 
 /// Double-clicked on Windows: the console window made for us has nothing to show.

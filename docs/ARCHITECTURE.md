@@ -381,8 +381,10 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   the `LINK` column.
 - **Tray icon** while open (closing the window keeps it in the tray): online machines count, open, quit.
   `tray-icon` on Windows / macOS, `ksni` (pure Rust D-Bus) on Linux: nothing linked to GTK, so the Linux
-  binary stays a single file that loads the GUI libraries at runtime. Starting at login is an option the
-  user turns on, not a service.
+  binary stays a single file. **Start at login** is an option the user turns on in *This computer*
+  (`gui/autostart.rs`): a login item of the user (Windows `Run` key, XDG autostart entry, LaunchAgent
+  without KeepAlive) that runs `gangli gui --hidden`, which stays in the tray (or shows the window after
+  3 s when there is no tray). Never a service.
 - **Local API** **[decided]**: off by default, enabled from the GUI or `gangli api enable` (on the console's local port,
   127.0.0.1:7373 by default, `[console] port`), served while a console is open. Named tokens made and revoked from the GUI or `gangli api token add|remove`,
   never through the API itself; scopes `read` (status, machines, details) and `admin` (also networks, removing

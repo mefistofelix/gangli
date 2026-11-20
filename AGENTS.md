@@ -73,7 +73,7 @@ src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec
 src/service/          system service per OS (SCM, launchd, systemd); install --to
 src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the
                       open one), native.rs (eframe + tray-icon: Windows, macOS), x11.rs + raster.rs + sni.rs
-                      (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), icon.rs,
+                      (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), autostart.rs (login item), icon.rs,
                       tr.rs (it/en), png.rs
 docs/ARCHITECTURE.md  design and decisions
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)

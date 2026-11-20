@@ -12,7 +12,7 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIc
 use super::client::Client;
 use super::{App, TrayAction, TrayModel};
 
-pub fn run(client: Client) -> Result<()> {
+pub fn run(client: Client, hidden: bool) -> Result<()> {
     let icon = egui::IconData { rgba: super::icon::rgba(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -20,7 +20,8 @@ pub fn run(client: Client) -> Result<()> {
             .with_app_id("gangli")
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([640.0, 420.0])
-            .with_icon(Arc::new(icon)),
+            .with_icon(Arc::new(icon))
+            .with_visible(!hidden),
         ..Default::default()
     };
     eframe::run_native(
@@ -30,7 +31,14 @@ pub fn run(client: Client) -> Result<()> {
             let app = App::new(client);
             let ctx = cc.egui_ctx.clone();
             app.set_waker(Arc::new(move || ctx.request_repaint()));
-            Ok(Box::new(Native::new(app, &cc.egui_ctx)))
+            let mut n = Native::new(app, &cc.egui_ctx);
+            // Hidden only when the tray can bring it back.
+            if hidden && n.tray.is_some() {
+                n.visible = false;
+            } else if hidden {
+                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            Ok(Box::new(n))
         }),
     )
     .map_err(|e| anyhow!("{e}"))

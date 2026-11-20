@@ -83,6 +83,8 @@ struct LocalNode {
     installed_at: Option<PathBuf>,
     /// This folder holds only gangli: the service can run from here (else `install --to`).
     own_folder: bool,
+    /// gangli starts at login, in the tray.
+    autostart: bool,
     read_at: Option<Instant>,
     /// Output of `gangli install` / `uninstall` run from here (None while it runs).
     job: Option<Arc<Mutex<Option<String>>>>,
@@ -302,6 +304,7 @@ impl App {
         self.node.installed_at = crate::service::installed_at();
         self.node.installed = crate::paths::service_installed() || self.node.installed_at.is_some();
         self.node.own_folder = crate::service::folder_is_own();
+        self.node.autostart = super::autostart::enabled();
         self.node.networks.clear();
         if let Ok(st) = crate::state::load() {
             for m in st.networks {
@@ -1154,6 +1157,19 @@ impl App {
         }
         if !self.node.job_output.is_empty() {
             ui.add(egui::Label::new(RichText::new(self.node.job_output.trim()).monospace()).wrap());
+        }
+        ui.add_space(14.0);
+        ui.label(RichText::new(tr("This window", "Questa finestra")).strong());
+        let mut on = self.node.autostart;
+        if ui
+            .checkbox(&mut on, tr("Start gangli at login, in the tray", "Avvia gangli all'accesso, nella tray"))
+            .on_hover_text(tr("Your machines stay listed and the tunnels on without opening gangli", "Le macchine restano in elenco e i tunnel attivi senza aprire gangli"))
+            .changed()
+        {
+            match super::autostart::set(on) {
+                Ok(()) => self.node.autostart = on,
+                Err(e) => self.toast(format!("{e:#}"), true),
+            }
         }
         ui.add_space(14.0);
         ui.label(RichText::new(tr("Files", "File")).strong());
