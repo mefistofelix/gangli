@@ -1,0 +1,4 @@
+/target/
+/out/
+# local tools: build-box clone, its password, release signing key (never committed)
+/.tools/
