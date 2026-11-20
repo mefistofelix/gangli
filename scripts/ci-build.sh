@@ -1,11 +1,13 @@
 #!/bin/bash
-# gangli's build on the blind build machine: runs there as build.sh of the archive that scripts/remote-build.sh
-# uploads, once per target OS (file build-target: linux | windows | macos; file build-number: N).
-# $OUT gets the binaries; $CACHE keeps zig, cargo-zigbuild, the cargo registry and the target dir between runs.
+# gangli's build for one OS, on a runner of this repository's GitHub Actions (.github/workflows/build.yml).
+# usage: ci-build.sh linux | windows | macos   (env: GANGLI_BUILD = N of the version 0.0.N, 0 when not a release)
+# out/ci gets the binaries; ~/.gangli-ci keeps zig, cargo-zigbuild, the cargo registry and the target dir (cached
+# between runs by the workflow).
 set -e
+OS="$1"
+OUT="${OUT:-$PWD/out/ci}"; CACHE="${CACHE:-$HOME/.gangli-ci}"
 mkdir -p "$CACHE" "$OUT"
-OS="$(cat build-target)"
-export GANGLI_BUILD="$(cat build-number)"
+export GANGLI_BUILD="${GANGLI_BUILD:-0}"
 export CARGO_TARGET_DIR="$CACHE/target"
 export CARGO_HOME="$CACHE/cargo-home"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
@@ -48,10 +50,6 @@ macos)
     "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/gangli" "$CARGO_TARGET_DIR/x86_64-apple-darwin/release/gangli"
   codesign --force -s - "$OUT/gangli-macos-universal"
   ;;
-*) echo "unknown build-target $OS"; exit 2;;
+*) echo "usage: ci-build.sh linux | windows | macos"; exit 2;;
 esac
-# the resolved dependency versions come back too (committed: reproducible builds)
-cp Cargo.lock "$OUT/Cargo.lock"
 ls -la "$OUT"
-# end-to-end test of what was just built (scripts/remote-build.sh --test)
-if [ -f build-test ]; then bash scripts/box-test.sh > "$OUT/test.log" 2>&1 || true; tail -1 "$OUT/test.log"; fi

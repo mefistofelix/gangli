@@ -37,7 +37,7 @@ when a decision changes.
   `~/.config`, `/var/lib`, no lock, port or temp files next to them either. Only the OS service registration is
   written elsewhere, by `install`, and the login item (`Run` key, XDG autostart, LaunchAgent) when the user
   turns "start at login" on in the GUI.
-- **Secrets** (node keys, console keys, network keys, API tokens, `.tools/box-password`) live in files readable
+- **Secrets** (node keys, console keys, network keys, API tokens) live in files readable
   only by their owner (root / SYSTEM / the user) and are never printed, logged or committed.
 - **No consent UI on managed machines** (owner's decision), but nothing hidden either: normal service name,
   normal path, working `uninstall`.
@@ -78,45 +78,45 @@ src/gui/              the window: app.rs (egui pages, same everywhere), client.r
                       tr.rs (it/en), png.rs
 docs/ARCHITECTURE.md  design and decisions
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
-scripts/remote-build.sh  builds the three OSes on build-box and publishes a release
-scripts/box-build.sh     what runs on the build machine (one target OS per run)
-scripts/box-test.sh      end-to-end test on the build machine (service, console, exec, GUI, update)
+.github/workflows/build.yml  the builds, tests and releases (GitHub Actions of this public repository)
+scripts/ci.sh            runs that workflow from here, waits, downloads the results into out/ci/<os>/
+scripts/ci-build.sh      the build of one OS on its runner
+scripts/ci-test.sh       end-to-end test on the runner (service, console, exec, GUI, update, uninstall)
 scripts/gui-drive.sh     drives the Linux GUI with xdotool (WSLg) for tests
 scripts/tray-test.py     a StatusNotifier watcher + host: prints gangli's Linux tray, clicks its menu
 scripts/tray-panel.sh    a real tray in WSLg (xfce4-panel, notification area only) for GUI tests
-.tools/               git-ignored: build-box clone, box-password
+.tools/               git-ignored local tools
 ```
 
 ## Building
 
-**No local builds** **[decided 2026-11-20]**: builds happen only on the owner's **public blind build machine
-`mefistofelix/build-box`** (GitHub Actions, free on public repositories; its README.md and AGENTS.md explain it),
-and things are verified with the binaries it produces (in `out/box-<os>/` and `out/release/`). From the project
-root in Git Bash:
+**No local builds** **[decided 2026-11-20]**: the repository is **public** and builds on its own **GitHub
+Actions** (`.github/workflows/build.yml`, free on public repositories), started by hand, never on every push;
+things are verified with the binaries it produces (`out/ci/<os>/`, or a release). From the project root in Git
+Bash, after `git push`:
 
 ```bash
-bash scripts/remote-build.sh            # build linux + windows + macos, publish release build-N
-bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os>/
-bash scripts/remote-build.sh --test     # also run scripts/box-test.sh on each runner; a failure stops the release
+bash scripts/ci.sh                # build linux + windows + macos, unit tests, end-to-end test; results in out/ci/<os>/
+bash scripts/ci.sh --no-test      # build and unit tests only
+bash scripts/ci.sh --release      # and, if everything passed, publish the release build-N
 ```
 
-- The working tree (tracked and new files, not the ignored ones) is staged with a `build.sh` calling
-  `scripts/box-build.sh`, sent encrypted with the password in `.tools/box-password` (the secret `BOX_PASSWORD`
-  of build-box; same file as the other projects, never print it). Three runs go in parallel: `ubuntu-latest`
-  (linux x86_64 + aarch64, static musl via cargo-zigbuild), `windows-latest` (x86_64 msvc, static CRT),
-  `macos-latest` (universal, ad-hoc signed).
-- Toolchains (rustup, zig, cargo-zigbuild) and the target dir are kept in `$CACHE`, per OS.
-- Logs come back in `out/box-<os>/build.log`.
-- Builds hit GitHub's API limit (5000 requests / hour; box.sh polls) and runner minutes (macOS above all): batch
-  changes, build rarely, keep `--test` runs short.
-- Push HEAD before a release build (the script checks it). The release `build-N` (N = newest + 1, also the
-  version `0.0.N` baked into the binary through `GANGLI_BUILD`) of this **private** repository gets
-  `gangli-linux-x86_64`, `gangli-linux-aarch64`, `gangli-windows-x86_64.exe`, `gangli-macos-universal` and
-  `SHA256SUMS`. The release points at the commit that was built.
+(or Actions → build → Run workflow on GitHub.)
+
+- Three jobs in parallel: `ubuntu-latest` (linux x86_64 + aarch64, static musl via cargo-zigbuild),
+  `windows-latest` (x86_64 msvc, static CRT), `macos-latest` (universal, ad-hoc signed: Apple Silicon runs
+  nothing without a signature). Toolchains (zig, cargo-zigbuild), the cargo registry and the target dir are
+  cached in `~/.gangli-ci` per OS.
+- Runner minutes, macOS above all: batch changes, run rarely, keep the end-to-end test short.
+- The release `build-N` (N = newest + 1, also the version `0.0.N` baked into the binary through
+  `GANGLI_BUILD`) gets `gangli-linux-x86_64`, `gangli-linux-aarch64`, `gangli-windows-x86_64.exe`,
+  `gangli-macos-universal` and `SHA256SUMS`, and points at the commit that was built. A failed test means no
+  release.
+- The repository is public: nothing secret in it, ever (codes, keys, tokens, passwords of real machines).
 
 ## Testing
 
-- Unit tests run on build-box as part of every build (`cargo test` on the native target of each runner).
+- Unit tests run on every build (`cargo test` on the native target of each runner).
 - End to end on one PC, no elevation, no service: `GANGLI_DATA_DIR` puts the files in another folder, one
   scratch folder per simulated machine (or simply copies of the binary in separate folders). `network create` on a
   console (`console run` in the background of the test), `node --code` for one or more nodes (each its own
@@ -125,10 +125,10 @@ bash scripts/remote-build.sh --test     # also run scripts/box-test.sh on each r
   goes through the real n0 relays, pkarr relays and the DHT. Close the console with `gangli console stop`.
 - Network behaviour (drops, slow links) is tested with an in-process loss/latency shim on the resumable stream
   layer, not only by hand.
-- Before a release that touches install / service code: `remote-build.sh --test` (install → online → exec as
-  SYSTEM / root → update → uninstall on the three runners, `out/box-<os>/test.log`, GUI screenshot
-  `out/box-<os>/gui-<os>.png`).
-- GUI, with build-box binaries (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
+- The end-to-end test of `scripts/ci.sh` (`scripts/ci-test.sh` on each runner): install as a service → online →
+  exec as SYSTEM / root → GUI screenshot → update (the service restarts) → uninstall, through the real relays;
+  `out/ci/<os>/test.log`, `out/ci/<os>/gui-<os>.png`. Needed before a release that touches install / service code.
+- GUI, with CI binaries (Linux in WSLg, `DISPLAY=:0`; Windows directly): `GANGLI_GUI_SCREENSHOT=out/x.png GANGLI_GUI_PAGE=networks
   gangli gui` saves the window as drawn and quits (read the PNG to check it); `GANGLI_GUI_TEST_TRAY=1` checks
   close-to-tray and reopen; on Linux `scripts/tray-panel.sh start` runs a real tray (xfce4-panel) in WSLg, and
   `scripts/tray-test.py` is a scriptable stand-in; `scripts/gui-drive.sh`

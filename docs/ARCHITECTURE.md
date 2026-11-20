@@ -375,7 +375,7 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   drives the Linux GUI with xdotool; `scripts/tray-panel.sh` runs a real tray (xfce4-panel 4.18) in WSLg: the icon
   shows, a left click opens the window, the panel's menu opens terminals and quits. Verified 2026-11-20: Linux in WSLg (clicks, typing with accents / `@`
   / `€`, copy and paste both ways, tray menu over D-Bus, close to tray and back, second instance, GUI on a
-  `console run`), Windows (pages, close to tray and back). macOS: builds on build-box, not run yet.
+  `console run`), Windows (pages, close to tray and back), macOS on the GitHub runner (window drawn, screenshot).
 - **Link quality in the GUI**: every machine shows whether its traffic goes **direct** (hole-punching worked)
   or through a **relay** (slower, rate limited on the public relays), with the RTT; the CLI has the same in
   the `LINK` column.
@@ -406,9 +406,9 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   XWayland on Wayland desktops), egui drawn by a CPU renderer into an X11 image, keyboard from the X11
   keymap, tray through `ksni` (pure-Rust D-Bus). No winit / GL on Linux; Windows and macOS use eframe
   normally. Verified in WSLg (section 12); the binary stays fully static (`static-pie linked`).
-- No local builds: everything is built on build-box and checked with its binaries; `remote-build.sh --test`
-  also runs an end-to-end test (service install, exec, GUI screenshot, update, uninstall) on each runner.
-- Built on the owner's blind build machine `mefistofelix/build-box`; see AGENTS.md.
+- No local builds: everything is built by the repository's GitHub Actions (public repository) and checked with
+  their binaries; the workflow also runs an end-to-end test on each runner (service install, exec as SYSTEM /
+  root, GUI screenshot, update, uninstall). Verified 2026-11-21 on the three OSes.
 
 ## 14. Libraries (researched 2026-11)
 
@@ -439,7 +439,7 @@ called for core features.
 
 ## 16. Roadmap
 
-1. Skeleton, build on build-box, release pipeline. ✓
+1. Skeleton, builds on GitHub Actions, release pipeline. ✓
 2. Service install / uninstall / elevation on the three OSes. ✓
 3. iroh, networks as keys, public / private codes, directory on pkarr, certificates, live sessions,
    inventory push, node without install, embedded code, one-shot or open console. ✓

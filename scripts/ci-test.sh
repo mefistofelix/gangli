@@ -1,12 +1,14 @@
 #!/bin/bash
-# End-to-end test on the build machine, right after scripts/box-build.sh, when the archive has a `build-test`
-# file (scripts/remote-build.sh --test). The binary just built runs as a real service (the runners have
+# End-to-end test on a runner of this repository's GitHub Actions, right after scripts/ci-build.sh (usage:
+# ci-test.sh linux | windows | macos). The binary just built runs as a real service (the runners have
 # passwordless sudo / an elevated account) with a real console, through the real relays: install, the
 # machine comes online, exec as the service account, the GUI (screenshot), update (the service restarts
 # with the binary it receives), uninstall. Short on purpose: runner minutes, the macOS ones above all.
-# Output: $OUT/test.log (this script's output), $OUT/gui-<os>.png, a last line "TESTS: n passed, m failed".
+# Output on stdout (the workflow keeps it as out/ci/test.log), out/ci/gui-<os>.png, a last line "TESTS: n passed,
+# m failed".
 set -u
-OS="$(cat build-target)"
+OS="$1"
+OUT="${OUT:-$PWD/out/ci}"
 case "$OS" in
   linux) BIN="$OUT/gangli-linux-x86_64"; EXE=gangli;;
   windows) BIN="$OUT/gangli-windows-x86_64.exe"; EXE=gangli.exe;;

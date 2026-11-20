@@ -1,0 +1,96 @@
+# gangli's builds, started by hand (Actions → build → Run workflow, or `bash scripts/ci.sh`): Linux x86_64 +
+# aarch64 (static musl), Windows x86_64 (msvc, static CRT), macOS universal; unit tests on each runner, then
+# optionally the end-to-end test (service install, console, exec, GUI screenshot, update, uninstall) and the
+# release build-N. Not on every push: runner minutes, the macOS ones above all.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the binaries as release build-N
+        type: boolean
+        default: false
+      test:
+        description: End-to-end test on each runner
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+
+jobs:
+  number:
+    runs-on: ubuntu-latest
+    outputs:
+      n: ${{ steps.n.outputs.n }}
+    steps:
+      - id: n
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N=0
+          if [ "${{ inputs.release }}" = true ]; then
+            LAST=$(gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName -q '.[].tagName' | sed -n 's/^build-//p' | sort -n | tail -1)
+            N=$(( ${LAST:-0} + 1 ))
+          fi
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: number
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, runner: ubuntu-latest }
+          - { os: windows, runner: windows-latest }
+          - { os: macos, runner: macos-latest }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      GANGLI_BUILD: ${{ needs.number.outputs.n }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.gangli-ci
+          key: gangli-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: gangli-${{ matrix.os }}-
+      - name: build
+        shell: bash
+        run: bash scripts/ci-build.sh ${{ matrix.os }}
+      - name: end-to-end test
+        if: inputs.test
+        shell: bash
+        run: |
+          bash scripts/ci-test.sh ${{ matrix.os }} 2>&1 | tee out/ci/test.log
+          tail -1 out/ci/test.log | grep -q " 0 failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gangli-${{ matrix.os }}
+          path: out/ci
+          if-no-files-found: ignore
+
+  release:
+    needs: [number, build]
+    if: inputs.release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: ${{ needs.number.outputs.n }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - run: |
+          mkdir rel
+          cp art/*/gangli-* rel/
+          (cd rel && sha256sum gangli-* > SHA256SUMS)
+          gh release create "build-$N" rel/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "gangli build $N" --notes "Built from ${GITHUB_SHA:0:7}." --latest
