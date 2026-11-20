@@ -96,6 +96,10 @@ pub enum Req {
         #[serde(default)]
         term: String,
     },
+    /// Console → node: `inner` (a `Shell` or a `Forward`) as a resumable stream named `id` (see resume.rs).
+    Stream { id: String, inner: Box<Req> },
+    /// Console → node, after a drop: reattach stream `id`; `received` = bytes the console got so far.
+    Resume { id: String, received: u64 },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,6 +114,7 @@ pub enum Resp {
     Info { node_name: String, inventory: Inventory },
     Forwarding,
     Started,
+    Resumed { received: u64 },
     Error { message: String },
 }
 

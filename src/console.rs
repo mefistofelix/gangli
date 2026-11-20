@@ -874,17 +874,10 @@ async fn run_tunnel(c: Arc<Console>, t: Tunnel) {
 
 async fn forward_one(c: &Arc<Console>, t: &Tunnel, mut sock: tokio::net::TcpStream) -> Result<()> {
     let (net, _, node) = find_node(c, &t.node)?;
-    let conn = ensure_live(c, &net, &node).await?;
-    let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
-    proto::write_frame(&mut send, &Req::Forward { target: t.target.clone() }).await?;
-    match tokio::time::timeout(Duration::from_secs(20), proto::read_frame::<_, Resp>(&mut recv)).await {
-        Ok(Ok(Resp::Forwarding)) => {}
-        Ok(Ok(Resp::Error { message })) => bail!("{message}"),
-        Ok(Ok(_)) => bail!("unexpected answer"),
-        Ok(Err(e)) => return Err(e),
-        Err(_) => bail!("no answer from {}", t.node),
+    let (mut remote, resp) = open_resumable(c, &net, &node, Req::Forward { target: t.target.clone() }, Duration::from_secs(15 * 60)).await?;
+    if !matches!(resp, Resp::Forwarding) {
+        bail!("unexpected answer");
     }
-    let mut remote = tokio::io::join(recv, send);
     let _ = tokio::io::copy_bidirectional(&mut sock, &mut remote).await;
     Ok(())
 }
@@ -1340,6 +1333,12 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             );
             Ok(json!({ "launcher": name, "argv": argv, "gateway_open": c.open }))
         }
+        IpcOp::DebugDrop { node } => {
+            let (_, _, id) = find_node(c, &node)?;
+            let conn = c.live_conn(&id).ok_or_else(|| anyhow!("no live session with {node}"))?;
+            conn.close(0u32.into(), b"debug drop");
+            Ok(json!({ "dropped": node }))
+        }
         IpcOp::Stop => {
             c.stop.notify_one();
             Ok(json!({ "stopping": true }))
@@ -1421,4 +1420,42 @@ fn login_for(c: &Console, node: &str, user: Option<&str>) -> Result<(String, Str
         .ok_or_else(|| anyhow!("no [[ssh.login]] rule allows {login}: `gangli ssh login add`"))?;
     let port = st.ssh.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(2222);
     Ok((login, rule.password.clone(), port, name))
+}
+
+/// Open `inner` (a `Shell` or a `Forward`) on a machine as a resumable stream: the returned pipe survives
+/// connection drops for `grace` (the machine is dialed again and the stream reattached). Also returns the
+/// machine's first answer (`Started` / `Forwarding`).
+pub(crate) async fn open_resumable(c: &Arc<Console>, net: &str, node: &str, inner: Req, grace: Duration) -> Result<(tokio::io::DuplexStream, Resp)> {
+    use crate::resume::{self, Reconnect, Transport};
+    let id = HEXLOWER.encode(&random16());
+    let conn = ensure_live(c, net, node).await?;
+    let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
+    proto::write_frame(&mut send, &Req::Stream { id: id.clone(), inner: Box::new(inner) }).await?;
+    let resp: Resp = tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut recv))
+        .await
+        .map_err(|_| anyhow!("the machine did not answer"))??;
+    if let Resp::Error { message } = resp {
+        bail!("{message}");
+    }
+    let (c2, net2, node2) = (c.clone(), net.to_string(), node.to_string());
+    let rc: Reconnect = Arc::new(move |received| {
+        let (c, net, node, id) = (c2.clone(), net2.clone(), node2.clone(), id.clone());
+        Box::pin(async move {
+            let conn = ensure_live(&c, &net, &node).await?;
+            let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
+            proto::write_frame(&mut send, &Req::Resume { id, received }).await?;
+            match tokio::time::timeout(Duration::from_secs(20), proto::read_frame::<_, Resp>(&mut recv)).await {
+                Ok(Ok(Resp::Resumed { received })) => {
+                    clog("stream resumed after a drop");
+                    Ok(Some(Transport { send: Box::new(send), recv: Box::new(recv), peer_received: received }))
+                }
+                Ok(Ok(Resp::Error { .. })) => Ok(None),
+                Ok(Ok(_)) => Ok(None),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(anyhow!("no answer to resume")),
+            }
+        })
+    });
+    let (app, _attach, _task) = resume::start(Transport { send: Box::new(send), recv: Box::new(recv), peer_received: 0 }, grace, Some(rc));
+    Ok((app, resp))
 }

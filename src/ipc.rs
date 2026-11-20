@@ -39,6 +39,7 @@ pub enum IpcOp {
     SshLoginAdd { hosts: Vec<String>, users: Vec<String>, password: Option<String>, key: Option<String> },
     SshLoginRemove { index: usize },
     Launch { node: String, launcher: Option<String>, user: Option<String> },
+    DebugDrop { node: String },
     Stop,
 }
 
@@ -52,7 +53,7 @@ impl IpcOp {
             IpcOp::TunnelAdd { .. } | IpcOp::TunnelRemove { .. } | IpcOp::TunnelSet { .. } => Some("admin"),
             // They show passwords.
             IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } => Some("admin"),
-            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } => None,
+            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::DebugDrop { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop => None,
         }
     }

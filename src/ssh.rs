@@ -338,16 +338,12 @@ async fn bridge(
     handle: &russh::server::Handle,
     channel: ChannelId,
 ) -> Result<i32> {
-    let conn = console::ensure_live(c, net, node).await?;
-    let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
-    proto::write_frame(&mut send, &req).await?;
-    match tokio::time::timeout(Duration::from_secs(30), proto::read_frame::<_, Resp>(&mut recv)).await {
-        Ok(Ok(Resp::Started)) => {}
-        Ok(Ok(Resp::Error { message })) => bail!("{message}"),
-        Ok(Ok(_)) => bail!("unexpected answer"),
-        Ok(Err(e)) => return Err(e),
-        Err(_) => bail!("the machine did not answer"),
+    // Resumable: the session survives connection drops (its process waits on the machine up to a day).
+    let (app, resp) = console::open_resumable(c, net, node, req, Duration::from_secs(24 * 3600)).await?;
+    if !matches!(resp, Resp::Started) {
+        bail!("unexpected answer");
     }
+    let (mut recv, mut send) = tokio::io::split(app);
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             let r = match m {
@@ -359,7 +355,7 @@ async fn bridge(
                 break;
             }
         }
-        let _ = send.finish();
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
     });
     let code = loop {
         let (kind, body) = match sframe::read(&mut recv).await {
@@ -425,16 +421,11 @@ impl russh::server::Handler for Conn {
         let (c, net, node, target) = (self.c.clone(), t.net.clone(), t.node.clone(), format!("{host_to_connect}:{port_to_connect}"));
         tokio::spawn(async move {
             let r: Result<()> = async {
-                let conn = console::ensure_live(&c, &net, &node).await?;
-                let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
-                proto::write_frame(&mut send, &Req::Forward { target: target.clone() }).await?;
-                match proto::read_frame::<_, Resp>(&mut recv).await? {
-                    Resp::Forwarding => {}
-                    Resp::Error { message } => bail!("{message}"),
-                    _ => bail!("unexpected answer"),
+                let (mut remote, resp) = console::open_resumable(&c, &net, &node, Req::Forward { target: target.clone() }, Duration::from_secs(15 * 60)).await?;
+                if !matches!(resp, Resp::Forwarding) {
+                    bail!("unexpected answer");
                 }
                 let mut local = channel.into_stream();
-                let mut remote = tokio::io::join(recv, send);
                 let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
                 Ok(())
             }

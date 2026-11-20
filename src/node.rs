@@ -459,6 +459,25 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     }
                 });
             }
+            Req::Stream { id, inner } if authed => {
+                tokio::spawn(open_stream(id, *inner, send, recv, peer.to_string()));
+            }
+            Req::Resume { id, received } if authed => {
+                let entry = streams().lock().unwrap().get(&id).cloned();
+                match entry {
+                    Some((console, attach)) if console == peer.to_string() => {
+                        let mine = attach.received.load(Ordering::SeqCst);
+                        if proto::write_frame(&mut send, &Resp::Resumed { received: mine }).await.is_ok() {
+                            let _ = attach.tx.send(crate::resume::Transport { send: Box::new(send), recv: Box::new(recv), peer_received: received });
+                            log_line(&format!("stream {} resumed", &id[..8.min(id.len())]));
+                        }
+                    }
+                    _ => {
+                        let _ = proto::write_frame(&mut send, &Resp::Error { message: "unknown stream".into() }).await;
+                        let _ = send.finish();
+                    }
+                }
+            }
             Req::Shell { user, command, pty, term } if authed => {
                 let term = if term.is_empty() { "xterm-256color".to_string() } else { term };
                 tokio::spawn(run_shell(send, recv, crate::proc::Spec { user, command, pty, term }));
@@ -576,3 +595,121 @@ where
     reader.abort();
 }
 
+
+/// Grace periods: a session (its process) waits a day for its console to come back, a forward 15 minutes.
+const SHELL_GRACE: Duration = Duration::from_secs(24 * 3600);
+const FORWARD_GRACE: Duration = Duration::from_secs(15 * 60);
+
+type StreamMap = std::sync::Mutex<HashMap<String, (String, crate::resume::Attach)>>;
+
+/// Resumable streams of this node: id → (console that opened it, attach handle).
+fn streams() -> &'static StreamMap {
+    static S: std::sync::OnceLock<StreamMap> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Answer the inner request on the raw stream, then run it over a resumable pump.
+async fn open_stream<W, R>(id: String, inner: Req, mut send: W, recv: R, console: String)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    use crate::resume::{self, Transport};
+    match inner {
+        Req::Shell { user, command, pty, term } => {
+            let term = if term.is_empty() { "xterm-256color".to_string() } else { term };
+            let who = user.clone();
+            let spec = crate::proc::Spec { user, command, pty, term };
+            let child = match tokio::task::spawn_blocking(move || crate::proc::spawn(&spec)).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{e:#}") }).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+                    return;
+                }
+                Err(_) => return,
+            };
+            if proto::write_frame(&mut send, &Resp::Started).await.is_err() {
+                return;
+            }
+            log_line(&format!("session opened as {who} (resumable)"));
+            let (app, attach, task) = resume::start(Transport { send: Box::new(send), recv: Box::new(recv), peer_received: 0 }, SHELL_GRACE, None);
+            register(id, console, attach, task);
+            let (r, w) = tokio::io::split(app);
+            pipe_child(w, r, child).await;
+        }
+        Req::Forward { target } => {
+            let tcp = match tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(target.as_str())).await {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{target}: {e}") }).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+                    return;
+                }
+                Err(_) => {
+                    let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{target}: no answer") }).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+                    return;
+                }
+            };
+            if proto::write_frame(&mut send, &Resp::Forwarding).await.is_err() {
+                return;
+            }
+            let (mut app, attach, task) = resume::start(Transport { send: Box::new(send), recv: Box::new(recv), peer_received: 0 }, FORWARD_GRACE, None);
+            register(id, console, attach, task);
+            let mut tcp = tcp;
+            let _ = tokio::io::copy_bidirectional(&mut tcp, &mut app).await;
+        }
+        _ => {
+            let _ = proto::write_frame(&mut send, &Resp::Error { message: "not a stream request".into() }).await;
+        }
+    }
+}
+
+fn register(id: String, console: String, attach: crate::resume::Attach, task: tokio::task::JoinHandle<()>) {
+    streams().lock().unwrap().insert(id.clone(), (console, attach));
+    tokio::spawn(async move {
+        let _ = task.await;
+        streams().lock().unwrap().remove(&id);
+    });
+}
+
+/// stdin / stdout / stderr / exit of a process as session frames over `w` / `r`.
+async fn pipe_child<W, R>(mut send: W, mut recv: R, child: crate::proc::Child)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    use crate::proc::{In, Out};
+    use crate::proto::sframe;
+    let crate::proc::Child { input, mut output } = child;
+    let reader = tokio::spawn(async move {
+        loop {
+            let msg = match sframe::read(&mut recv).await {
+                Ok((sframe::DATA, d)) => In::Data(d),
+                Ok((sframe::RESIZE, b)) if b.len() == 4 => In::Resize(u16::from_be_bytes([b[0], b[1]]), u16::from_be_bytes([b[2], b[3]])),
+                Ok((sframe::EOF, _)) => In::Eof,
+                Ok(_) => continue,
+                Err(_) => break,
+            };
+            if input.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+    while let Some(o) = output.recv().await {
+        let r = match o {
+            Out::Stdout(d) => sframe::write(&mut send, sframe::DATA, &d).await,
+            Out::Stderr(d) => sframe::write(&mut send, sframe::STDERR, &d).await,
+            Out::Exit(code) => {
+                let _ = sframe::write(&mut send, sframe::EXIT, &code.to_be_bytes()).await;
+                break;
+            }
+        };
+        if r.is_err() {
+            break;
+        }
+    }
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+    reader.abort();
+}

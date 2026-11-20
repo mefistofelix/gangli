@@ -134,7 +134,8 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
 Three layers, each one independent:
 
 1. **Path (iroh).** Multipath, migration, keepalives. Short drops and network changes are absorbed here.
-2. **Resumable streams (phase 4).** Every forwarded stream (ssh, TCP forward, SOCKS, exec) has a session id;
+2. **Resumable streams** (implemented, `resume.rs`; verified 2026-11-20: an SSH session printing a count kept
+   every line, in order, across a forced cut of the connection).** Every forwarded stream (ssh, TCP forward, SOCKS, exec) has a session id;
    both ends keep the bytes the other side has not acknowledged in a ring buffer (default 8 MiB per stream).
    When the connection dies, it is redialed at once (and on every network-change event), `RESUME(session,
    received_offset)`, both sides replay what is missing. **The local TCP connections (PuTTY ↔ console, node ↔
@@ -156,8 +157,8 @@ while the console is away (`gangli job output <id>`).
 **Status (2026-11-20):** implemented and verified on Windows with the OpenSSH client: key and password
 logins, `user+machine`, commands with exit codes, interactive PowerShell in ConPTY, SFTP upload / download,
 `ssh -L`. Not verified yet: Linux / macOS nodes (built and unit-tested only), the `desktop` user through a
-SYSTEM service, the PuTTY / WinSCP launchers. Open sessions do not survive a dropped connection until the
-resumable streams (phase 4).
+SYSTEM service, the PuTTY / WinSCP launchers. Sessions and forwards are resumable streams: they survive
+dropped connections (grace: 24 h for sessions, 15 min for forwards).
 
 The open console runs an SSH server (russh) on `127.0.0.1:2222` (configurable). Any SSH client — PuTTY,
 OpenSSH, WinSCP, VS Code Remote, an LLM's `ssh` — connects there. The host is always `127.0.0.1`, so **the
@@ -263,7 +264,11 @@ open connections survive drops too). CLI: `gangli tunnel add|remove|list|on|off`
 
 Always on **[decided]**: every node is a hop into its LAN.
 
-- `gangli forward nas 192.168.1.1:80` → local port; `gangli socks nas` → SOCKS5 on `127.0.0.1`.
+- Saved tunnels (`gangli tunnel add`, section 7) for fixed targets; for any target, the SSH client's dynamic
+  forwarding through the gateway: `ssh -D 1080 -p 2222 root+nas@127.0.0.1` (PuTTY: a "Dynamic" tunnel) makes
+  a SOCKS proxy on this computer that exits from `nas`'s LAN. **[decided 2026-11-20]** no SOCKS server of
+  our own for now; if needed later: one proxy where the host name picks the exit machine
+  (`192.168.1.1.nas.gangli`, `nas.gangli:8080`, with `socks5h`).
 - The node reports interfaces, gateway, DNS and the neighbour table, and can run a quick scan on request.
 
 ## 9. Inventory

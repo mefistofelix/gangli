@@ -16,6 +16,7 @@ mod node_cmd;
 mod paths;
 mod proc;
 mod proto;
+mod resume;
 mod service;
 mod sftp;
 mod ssh;
@@ -120,6 +121,9 @@ enum Command {
     /// node: SFTP server on stdin / stdout (started by the node for SFTP sessions).
     #[command(hide = true, name = "sftp-server")]
     SftpServer,
+    /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
+    #[command(hide = true, name = "debug-drop")]
+    DebugDrop { node: String },
     /// Copy a gangli binary with a public code embedded: running it is enough to become a node.
     Pack {
         /// Public network code to embed.
@@ -369,6 +373,7 @@ fn main() {
         ),
         Some(Command::Open { node, launcher, user }) => console_cmd::open(&node, launcher, user, json),
         Some(Command::SftpServer) => sftp::serve().map_err(io_err),
+        Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
     };
     if let Err(e) = result {
         if json {
