@@ -20,10 +20,8 @@ pub fn install(join: Option<&str>) -> io::Result<()> {
     crate::elevate::ensure_root()?;
     let bin = install_bin();
     super::copy_self_to(&bin)?;
-    super::create_state_dir()?;
-    if let Some(code) = join {
-        crate::config::store_pending_join(code)?;
-    }
+    super::secure_dir_io()?;
+    super::record_join(join)?;
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
         .map_err(to_io)?;

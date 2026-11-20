@@ -234,11 +234,32 @@ gets new releases from this private repository (token in its config) or by `gang
 Code from osewa / pigeons can be read and adapted (Apache-2.0 / MIT, keep notices); no external binaries are
 called.
 
-## 14. Roadmap
+## 14. Implementation notes (phase 3, 2026-11)
 
-1. Skeleton, build on build-box, release pipeline. ← now
-2. Service install / uninstall / elevation on the three OSes; local IPC; embedded trailer.
-3. iroh endpoints, network create, join code, client pairing, certificates, node list + inventory.
+- **iroh 1.5** with `presets::N0` (n0 relays and address lookup); one endpoint per process: the service uses
+  the node key, the client its own `client.key`.
+- **Join / pairing code** = kind byte + master endpoint id + 16-byte secret (`gangli-` + 79 base32 chars).
+  The code does not carry the network id: the master id is the trust anchor (iroh authenticates it), and the
+  master answers the join with the network id, the node's certificate and its own master certificate, which
+  the agent / client verify and pin.
+- **Certificates** are signed by the network key over a domain-separated JSON body: agent 10 years, client
+  1 year (renewal comes with phase 8), master 10 years.
+- **CLI ↔ service** go through the state file, not a socket: elevated commands change `state.json` under a
+  cross-process lock (`File::lock`), the service rereads it every 2 s. The named pipe / unix socket of
+  section 9 arrives with the GUI, which needs live answers.
+- **Windows elevation** relaunches hidden with UAC and relays the elevated copy's output into the same
+  terminal (temp file), so `gangli master code home` prints the code where it was typed.
+- **State dir ACL on Windows**: inheritance removed, SYSTEM + Administrators only (`icacls`), because
+  ProgramData is readable by every user.
+- **Known limits**: a master machine cannot (yet) join its own network as an agent (it would have to call
+  itself); revocation lists and agent-side allowlists of client ids are not pushed yet: an agent accepts
+  any client certificate signed by the network key.
+
+## 15. Roadmap
+
+1. Skeleton, build on build-box, release pipeline. ✓
+2. Service install / uninstall / elevation on the three OSes. ✓ (IPC and embedded trailer moved to 6 and 8)
+3. iroh endpoints, network create, join code, client pairing, certificates, node list + inventory. ✓
 4. Resumable streams; `forward`, `socks`, `proxy`, SSH config writer.
 5. Embedded SSH server (users, Windows tokens), SSH gateway, SFTP.
 6. GUI (three tabs), local API + token approval, PuTTY launcher.

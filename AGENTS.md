@@ -17,8 +17,10 @@ when a decision changes.
   terminal are libraries). Launching the user's own tools (PuTTY, ssh) from the client is fine.
 - **No inbound ports, ever.** Every listener is either iroh (peer-authenticated) or bound to `127.0.0.1` /
   local IPC.
-- **Reject unknown peers at the handshake.** No application byte is processed before the peer's certificate
-  is checked against the network key and the revocation list.
+- **Authenticate before acting.** The peer's endpoint id is authenticated by iroh's handshake; every request
+  must then prove its right before anything is done: a client certificate naming that endpoint id, signed by
+  the network key (and, on the master, still in the paired-clients list), or on a master a valid join /
+  pairing secret. Anything else gets an error answer and nothing more.
 - **The master role is the network private key**, never a flag in a join code. Join codes and embedded
   binaries must not be able to grant more than "enroll a node".
 - **Agents never accept connections from other agents**, only from clients with a valid certificate.
@@ -36,7 +38,16 @@ when a decision changes.
 
 ```
 Cargo.toml            single crate for now (bin `gangli`); split into a workspace when it grows
-src/                  code
+src/main.rs           CLI (clap) and dispatch
+src/daemon.rs         service body: iroh endpoint, master and agent sides of gangli/ctrl/1
+src/client.rs         client commands (pair, nodes, info)
+src/master.rs         state commands (master create/code/pair/nodes, join, leave, status)
+src/proto.rs          control protocol messages and the request/answer helper
+src/cert.rs code.rs   certificates; join / pairing codes
+src/state.rs store.rs service state model; locked owner-only JSON files
+src/inventory.rs      what a node reports (sysinfo)
+src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec/sudo)
+src/service/          system service per OS (SCM, launchd, systemd)
 docs/ARCHITECTURE.md  design and decisions
 scripts/remote-build.sh  builds the three OSes on build-box and publishes a release
 scripts/box-build.sh     what runs on the build machine (one target OS per run)
@@ -69,6 +80,10 @@ bash scripts/remote-build.sh --no-release   # build only, results in out/box-<os
 ## Testing
 
 - Unit tests run on build-box as part of every build (`cargo test` on the native target of each runner).
+- End to end on one PC, no elevation, no service: development mode with `GANGLI_STATE_DIR` (service state)
+  and `GANGLI_CLIENT_DIR` (client state) pointing at scratch folders. Run a master and an agent as two
+  `gangli run` processes with different state dirs, then pair a client and use `nodes` / `info`; the
+  traffic goes through the real n0 relays and discovery.
 - Network behaviour (drops, slow links) is tested with an in-process loss/latency shim on the resumable stream
   layer, not only by hand.
 - Before a release that touches install / service code, try install → join → uninstall on all three OSes.

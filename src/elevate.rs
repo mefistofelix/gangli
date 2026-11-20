@@ -1,7 +1,12 @@
 //! One elevation prompt, the native way per OS: Windows UAC, macOS authorization dialog, Linux polkit.
-//! `install` and `uninstall` call [`ensure_root`] first; if the process is not elevated it re-launches
-//! itself elevated with the same arguments and the current process exits with the child's status.
+//! Commands that need it call [`ensure_root`] (service install / uninstall) or [`ensure_admin`] (state
+//! commands; skipped in the `GANGLI_STATE_DIR` development mode). When the process is not elevated it
+//! re-launches itself elevated with the same arguments and exits with the child's status.
+//!
+//! Windows: the elevated copy runs hidden and writes its output to a temp file that this process prints,
+//! so the user sees the answer (a join code, a status) in the same terminal after one UAC prompt.
 
+#[cfg(unix)]
 use std::process::Command;
 
 /// Returns normally if already elevated. Otherwise re-launches self elevated and exits the process.
@@ -12,13 +17,19 @@ pub fn ensure_root() -> std::io::Result<()> {
     relaunch_elevated()
 }
 
+/// Like [`ensure_root`], except in development mode (`GANGLI_STATE_DIR`), where the state is the user's own.
+pub fn ensure_admin() -> std::io::Result<()> {
+    if crate::paths::dev_state_override().is_some() {
+        return Ok(());
+    }
+    ensure_root()
+}
+
 #[cfg(windows)]
 pub fn is_root() -> bool {
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-    };
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
@@ -41,62 +52,119 @@ pub fn is_root() -> bool {
 
 #[cfg(unix)]
 pub fn is_root() -> bool {
-    // Safe FFI: geteuid never fails and takes no arguments.
+    // geteuid never fails and takes no arguments.
     unsafe { libc::geteuid() == 0 }
+}
+
+/// Quote one argument for a Windows command line (CommandLineToArgvW rules).
+#[cfg(windows)]
+fn win_quote(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from('"');
+    let mut backslashes = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(windows)]
 fn relaunch_elevated() -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_NORMAL;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let exe = std::env::current_exe()?;
-    // Everything after the program name, quoted so paths with spaces survive.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let params = args
-        .iter()
-        .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let out = std::env::temp_dir().join(format!("gangli-elevated-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let mut params = format!("--elevated-output {}", win_quote(&out.to_string_lossy()));
+    for a in std::env::args().skip(1) {
+        params.push(' ');
+        params.push_str(&win_quote(&a));
+    }
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain([0]).collect() };
+    let verb = wide("runas");
+    let file: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    let params_w = wide(&params);
 
-    let wide = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain([0]).collect() };
-    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
-    let file = wide(exe.as_os_str());
-    let params_w: Vec<u16> = params.encode_utf16().chain([0]).collect();
-
-    // ShellExecuteW with the "runas" verb triggers the UAC consent prompt.
-    let r = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            file.as_ptr(),
-            params_w.as_ptr(),
-            std::ptr::null(),
-            SW_NORMAL,
-        )
-    };
-    // The return value is >32 on success. The elevated copy owns the console from here.
-    if (r as isize) <= 32 {
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params_w.as_ptr();
+    info.nShow = SW_HIDE;
+    // Shows the UAC consent prompt.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "the administrator prompt was refused",
+            "administrator rights are needed and the prompt was refused",
         ));
     }
-    println!("continuing in the elevated window...");
-    std::process::exit(0);
+    let mut code: u32 = 1;
+    if !info.hProcess.is_null() {
+        unsafe {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            GetExitCodeProcess(info.hProcess, &mut code);
+            CloseHandle(info.hProcess);
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(&out) {
+        print!("{text}");
+    }
+    let _ = std::fs::remove_file(&out);
+    std::process::exit(code as i32);
+}
+
+/// In the elevated copy: `--elevated-output <file>` (added by [`relaunch_elevated`]) sends stdout and stderr
+/// to that file. Removes the two arguments so clap never sees them.
+#[cfg(windows)]
+pub fn adopt_elevated_output(args: &mut Vec<std::ffi::OsString>) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    if args.len() < 3 || args[1].to_str() != Some("--elevated-output") {
+        return;
+    }
+    let path = args.remove(2);
+    args.remove(1);
+    if let Ok(f) = std::fs::File::create(&path) {
+        let h = f.into_raw_handle();
+        unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, h as _);
+            SetStdHandle(STD_ERROR_HANDLE, h as _);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn relaunch_elevated() -> std::io::Result<()> {
-    // osascript shows the standard macOS authentication dialog and runs the command as root.
+    // osascript shows the standard macOS authentication dialog and runs the command as root; it prints the
+    // command's output when done.
     let exe = std::env::current_exe()?;
-    let mut inner = format!("{}", shell_quote(&exe.to_string_lossy()));
+    let mut inner = shell_quote(&exe.to_string_lossy());
     for a in std::env::args().skip(1) {
         inner.push(' ');
         inner.push_str(&shell_quote(&a));
     }
-    // Escape for the AppleScript string literal.
+    inner.push_str(" 2>&1");
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
         inner.replace('\\', "\\\\").replace('"', "\\\"")
@@ -128,4 +196,15 @@ fn relaunch_elevated() -> std::io::Result<()> {
 #[cfg(target_os = "macos")]
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn quoting() {
+        assert_eq!(super::win_quote("abc"), "abc");
+        assert_eq!(super::win_quote("a b"), "\"a b\"");
+        assert_eq!(super::win_quote(r"C:\x y\"), "\"C:\\x y\\\\\"");
+        assert_eq!(super::win_quote("a\"b"), "\"a\\\"b\"");
+    }
 }
