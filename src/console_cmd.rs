@@ -277,3 +277,77 @@ pub fn tunnel(op: IpcOp, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn ssh(op: IpcOp, json: bool) -> Result<()> {
+    let v = ipc::call(op)?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    if let Some(login) = v.get("login").and_then(|l| l.as_str()) {
+        println!("login     {login}");
+        println!("password  {}", v["password"].as_str().unwrap_or(""));
+        println!("address   127.0.0.1:{}", v["port"]);
+        println!("example   ssh -p {} {login}@127.0.0.1", v["port"]);
+        return Ok(());
+    }
+    if let Some(i) = v.get("removed") {
+        println!("login rule {i} removed");
+        return Ok(());
+    }
+    if v.get("logins").is_none() {
+        println!("login rule {} added: machines {}, users {}, password {}", v["index"], v["hosts"], v["users"], v["password"].as_str().unwrap_or(""));
+        return Ok(());
+    }
+    println!(
+        "SSH gateway {} on {}{}",
+        if v["enabled"].as_bool() == Some(true) { "enabled" } else { "disabled" },
+        v["listen"].as_str().unwrap_or(""),
+        if v["open"].as_bool() == Some(true) { "" } else { " (runs while a console is open)" }
+    );
+    println!("log in as user+machine, e.g. ssh -p 2222 root+nas@127.0.0.1");
+    println!();
+    println!("login rules (the most specific match wins):");
+    for r in v["logins"].as_array().cloned().unwrap_or_default() {
+        println!(
+            "  {:>2}. machines {:<20} users {:<16} password {}{}",
+            r["index"],
+            r["hosts"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+            r["users"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+            r["password"].as_str().unwrap_or(""),
+            match r["keys"].as_u64() {
+                Some(0) | None => String::new(),
+                Some(n) => format!(", {n} key(s)"),
+            }
+        );
+    }
+    println!();
+    println!("launchers (`gangli open <machine> --with <name>`):");
+    for l in v["launchers"].as_array().cloned().unwrap_or_default() {
+        println!("  {:<10} {}", l["name"].as_str().unwrap_or(""), l["command"].as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
+/// Fill the launcher and start the program (detached from this terminal).
+pub fn open(node: &str, launcher: Option<String>, user: Option<String>, json: bool) -> Result<()> {
+    let v = ipc::call(IpcOp::Launch { node: node.to_string(), launcher, user })?;
+    let argv: Vec<String> = serde_json::from_value(v["argv"].clone())?;
+    let Some((prog, args)) = argv.split_first() else { anyhow::bail!("empty launcher command") };
+    std::process::Command::new(prog)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("cannot start {prog}: {e} (fix its path in the [[launcher]] of gangli.console)"))?;
+    if json {
+        print_json(&json!({ "started": v["launcher"], "gateway_open": v["gateway_open"] }));
+    } else {
+        println!("{} started for {node}", v["launcher"].as_str().unwrap_or(""));
+        if v["gateway_open"].as_bool() != Some(true) {
+            eprintln!("note: the SSH gateway runs while a console is open (GUI / tray or `gangli console run`)");
+        }
+    }
+    Ok(())
+}

@@ -85,6 +85,17 @@ pub enum Req {
     /// Console → node: connect to `target` (the machine's LAN or localhost); after `Forwarding` the stream
     /// carries the raw bytes both ways.
     Forward { target: String },
+    /// Console → node: a shell (no `command`) or a command, with a terminal (`pty`) or plain pipes, as `user`
+    /// (`system`, `desktop` or an account name). After `Started` the stream carries [`SFrame`]s.
+    Shell {
+        user: String,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        pty: Option<(u16, u16)>,
+        #[serde(default)]
+        term: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -98,6 +109,7 @@ pub enum Resp {
     Welcome { node_name: String, inventory: Inventory },
     Info { node_name: String, inventory: Inventory },
     Forwarding,
+    Started,
     Error { message: String },
 }
 
@@ -178,4 +190,45 @@ pub async fn call(ep: &Endpoint, peer: PublicKey, req: &Req) -> Result<Resp> {
     let r = request(&conn, req).await;
     conn.close(0u32.into(), b"done");
     r
+}
+
+/// Session stream frames (binary: kind, u32 length, payload). Console → node: `Data` (stdin), `Resize`,
+/// `Eof`. Node → console: `Data` (stdout / terminal), `Stderr`, `Exit`.
+pub mod sframe {
+    use anyhow::{bail, Result};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    pub const DATA: u8 = 1;
+    pub const STDERR: u8 = 2;
+    pub const RESIZE: u8 = 3;
+    pub const EOF: u8 = 4;
+    pub const EXIT: u8 = 5;
+
+    pub async fn write<W: AsyncWrite + Unpin>(w: &mut W, kind: u8, payload: &[u8]) -> Result<()> {
+        let mut buf = Vec::with_capacity(5 + payload.len());
+        buf.push(kind);
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(payload);
+        w.write_all(&buf).await?;
+        Ok(())
+    }
+
+    pub async fn read<R: AsyncRead + Unpin>(r: &mut R) -> Result<(u8, Vec<u8>)> {
+        let mut head = [0u8; 5];
+        r.read_exact(&mut head).await?;
+        let len = u32::from_be_bytes(head[1..5].try_into().unwrap()) as usize;
+        if len > (4 << 20) {
+            bail!("frame too large");
+        }
+        let mut body = vec![0u8; len];
+        r.read_exact(&mut body).await?;
+        Ok((head[0], body))
+    }
+
+    pub fn resize(cols: u16, rows: u16) -> [u8; 4] {
+        let mut b = [0u8; 4];
+        b[..2].copy_from_slice(&cols.to_be_bytes());
+        b[2..].copy_from_slice(&rows.to_be_bytes());
+        b
+    }
 }

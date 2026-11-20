@@ -153,6 +153,12 @@ while the console is away (`gangli job output <id>`).
 
 ### Local SSH gateway (console side)
 
+**Status (2026-11-20):** implemented and verified on Windows with the OpenSSH client: key and password
+logins, `user+machine`, commands with exit codes, interactive PowerShell in ConPTY, SFTP upload / download,
+`ssh -L`. Not verified yet: Linux / macOS nodes (built and unit-tested only), the `desktop` user through a
+SYSTEM service, the PuTTY / WinSCP launchers. Open sessions do not survive a dropped connection until the
+resumable streams (phase 4).
+
 The open console runs an SSH server (russh) on `127.0.0.1:2222` (configurable). Any SSH client — PuTTY,
 OpenSSH, WinSCP, VS Code Remote, an LLM's `ssh` — connects there. The host is always `127.0.0.1`, so **the
 username says where to go**:
@@ -222,6 +228,13 @@ Placeholders: `{node}`, `{network}`, `{user}`, `{login}` (= `user@node`), `{logi
 
 The GUI's terminal tab uses the same node-side session protocol directly (no SSH), and later the persistent,
 mosh-like terminal of section 6.
+
+**Images in the terminal** (Kitty graphics protocol, sixel, iTerm2 inline images) are escape sequences in the
+terminal stream: the gateway and the node's PTY carry them untouched, so they work from Linux / macOS nodes when
+the local terminal supports them (kitty, WezTerm, Ghostty, iTerm2; Windows Terminal: sixel; not PuTTY).
+From Windows nodes ConPTY re-renders the output and most likely drops them **[verify]**. The persistent
+terminal keeps a screen state, so its VT engine must understand them: libghostty-vt does (Kitty graphics),
+alacritty_terminal does not — a reason to prefer libghostty-vt there.
 
 ### Saved tunnels
 
@@ -329,7 +342,8 @@ atomically, restart, and roll back if the new version does not come back healthy
   libraries, so the GUI speaks the protocols itself: X11 through `x11rb`'s pure-Rust connection (also
   XWayland on Wayland desktops), egui drawn by a CPU renderer into an X11 image, keyboard from the X11
   keymap, tray through `ksni` (pure-Rust D-Bus). No winit / GL on Linux; Windows and macOS use eframe
-  normally. **[verify]** in phase 6.
+  normally. **[verify]** in phase 6. Tested headless on build-box's Ubuntu runner
+  under Xvfb (window up, screenshot back in the encrypted result) once the rest of the phase is done.
 - Built on the owner's blind build machine `mefistofelix/build-box`; see AGENTS.md.
 
 ## 14. Libraries (researched 2026-11)
@@ -367,8 +381,8 @@ called for core features.
 2. Service install / uninstall / elevation on the three OSes. ✓
 3. iroh, networks as keys, public / private codes, directory on pkarr, certificates, live sessions,
    inventory push, node without install, embedded code, one-shot or open console. ✓
-4. Resumable streams; `forward`, `socks`, `proxy`, SSH config writer.
-5. Embedded SSH server (users, Windows tokens), SSH gateway, SFTP.
+4. SSH gateway, sessions as users (Windows tokens, Unix uid), SFTP, saved tunnels, launchers. ✓
+5. Resumable streams (sessions and tunnels survive drops), SOCKS, `exec` / jobs for LLMs.
 6. GUI with tray (node + console unified), local HTTP API + token approval, PuTTY launcher.
 7. `exec` / jobs, `gangli term` with VT engine, state sync, predictive echo.
 8. Signed self-update over the sessions; directory pages for more than 8 nodes; public code rotation; own relay.

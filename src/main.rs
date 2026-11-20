@@ -14,8 +14,11 @@ mod ipc;
 mod node;
 mod node_cmd;
 mod paths;
+mod proc;
 mod proto;
 mod service;
+mod sftp;
+mod ssh;
 mod state;
 mod store;
 mod util;
@@ -101,6 +104,22 @@ enum Command {
     /// console: saved tunnels to a machine's LAN, active while a console is open.
     #[command(subcommand)]
     Tunnel(TunnelCmd),
+    /// console: the SSH gateway (127.0.0.1:2222, logins `user+machine`).
+    #[command(subcommand)]
+    Ssh(SshCmd),
+    /// console: open a machine with an external program from the launchers (PuTTY, OpenSSH, WinSCP…).
+    Open {
+        node: String,
+        /// Launcher name (default: the first in gangli.console).
+        #[arg(long = "with")]
+        launcher: Option<String>,
+        /// Account on the machine (default: its desktop user, else the service account).
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// node: SFTP server on stdin / stdout (started by the node for SFTP sessions).
+    #[command(hide = true, name = "sftp-server")]
+    SftpServer,
     /// Copy a gangli binary with a public code embedded: running it is enough to become a node.
     Pack {
         /// Public network code to embed.
@@ -145,6 +164,41 @@ enum ApiCmd {
     /// Access tokens.
     #[command(subcommand)]
     Token(TokenCmd),
+}
+
+#[derive(Subcommand)]
+enum SshCmd {
+    /// Gateway address, login rules (with their passwords) and launchers.
+    Status,
+    /// The login and password that apply to a machine (and user).
+    Password {
+        node: String,
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Login rules.
+    #[command(subcommand)]
+    Login(LoginCmd),
+}
+
+#[derive(Subcommand)]
+enum LoginCmd {
+    /// Add a rule (default: every machine, every user, a generated password).
+    Add {
+        /// Machines, comma separated (`nas,nonna-pc`), or `*`.
+        #[arg(long, value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Accounts, comma separated (`root,desktop`), or `*`.
+        #[arg(long, value_delimiter = ',')]
+        users: Vec<String>,
+        #[arg(long)]
+        password: Option<String>,
+        /// An OpenSSH public key (`ssh-ed25519 AAAA…`).
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Remove a rule by its number (`gangli ssh status`).
+    Remove { index: usize },
 }
 
 #[derive(Subcommand)]
@@ -304,6 +358,17 @@ fn main() {
             json,
         ),
         Some(Command::Pack { code, from, out }) => pack(&code, from, &out, json),
+        Some(Command::Ssh(s)) => console_cmd::ssh(
+            match s {
+                SshCmd::Status => ipc::IpcOp::SshStatus,
+                SshCmd::Password { node, user } => ipc::IpcOp::SshPassword { node, user },
+                SshCmd::Login(LoginCmd::Add { hosts, users, password, key }) => ipc::IpcOp::SshLoginAdd { hosts, users, password, key },
+                SshCmd::Login(LoginCmd::Remove { index }) => ipc::IpcOp::SshLoginRemove { index },
+            },
+            json,
+        ),
+        Some(Command::Open { node, launcher, user }) => console_cmd::open(&node, launcher, user, json),
+        Some(Command::SftpServer) => sftp::serve().map_err(io_err),
     };
     if let Err(e) = result {
         if json {

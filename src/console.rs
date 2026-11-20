@@ -56,6 +56,10 @@ pub struct ConsoleState {
     pub console: ConsoleConf,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
+    pub ssh: crate::ssh::SshConf,
+    #[serde(default, rename = "launcher")]
+    pub launchers: Vec<crate::ssh::Launcher>,
     #[serde(default, rename = "tunnel")]
     pub tunnels: Vec<Tunnel>,
     #[serde(default, rename = "network")]
@@ -193,7 +197,7 @@ impl ProtocolHandler for Handler {
 /// Load `gangli.console`, making the console key and the local token on first use.
 pub fn load_state() -> Result<ConsoleState> {
     let st: ConsoleState = store::load(&path())?;
-    if store::secret_from_hex(&st.console.key).is_ok() && !st.console.token.is_empty() {
+    if store::secret_from_hex(&st.console.key).is_ok() && !st.console.token.is_empty() && !st.ssh.logins.is_empty() && !st.launchers.is_empty() {
         return Ok(st);
     }
     store::update(&path(), HEADER, |st: &mut ConsoleState| {
@@ -202,6 +206,12 @@ pub fn load_state() -> Result<ConsoleState> {
         }
         if st.console.token.is_empty() {
             st.console.token = HEXLOWER.encode(&random16());
+        }
+        if st.ssh.logins.is_empty() {
+            st.ssh.logins.push(crate::ssh::default_rule());
+        }
+        if st.launchers.is_empty() {
+            st.launchers = crate::ssh::default_launchers();
         }
         Ok(st.clone())
     })
@@ -242,6 +252,7 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
     if let Some(listener) = listener {
         spawn_http(c.clone(), listener);
         sync_tunnels(&c);
+        crate::ssh::start(c.clone()).await;
         tokio::spawn(manager(c.clone()));
         tokio::spawn(directory_loop(c.clone()));
         tokio::spawn(watch_file(c.clone()));
@@ -291,6 +302,19 @@ async fn watch_file(c: Arc<Console>) {
 }
 
 impl Console {
+    pub(crate) fn ssh_conf(&self) -> crate::ssh::SshConf {
+        self.state.lock().unwrap().ssh.clone()
+    }
+
+    pub(crate) fn secret_key(&self) -> Result<SecretKey> {
+        store::secret_from_hex(&self.state.lock().unwrap().console.key)
+    }
+
+    pub(crate) fn node_name(&self, net: &str, node: &str) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        st.networks.iter().find(|n| n.id == net)?.nodes.iter().find(|x| x.id == node).map(|x| x.name.clone())
+    }
+
     fn endpoint(&self) -> &Endpoint {
         self.router.get().expect("router set at start").endpoint()
     }
@@ -706,7 +730,7 @@ async fn dial(c: Arc<Console>, net: String, node: String) -> Result<()> {
 }
 
 /// A live connection to `node`, dialing it now if needed.
-async fn ensure_live(c: &Arc<Console>, net: &str, node: &str) -> Result<Arc<Connection>> {
+pub(crate) async fn ensure_live(c: &Arc<Console>, net: &str, node: &str) -> Result<Arc<Connection>> {
     if let Some(conn) = c.live_conn(node) {
         return Ok(conn);
     }
@@ -950,7 +974,7 @@ fn api_json(api: &ApiConfig, port: u16) -> Value {
     })
 }
 
-fn find_node(c: &Console, target: &str) -> Result<(String, String, String)> {
+pub(crate) fn find_node(c: &Console, target: &str) -> Result<(String, String, String)> {
     let st = c.state.lock().unwrap();
     let (node, net) = match target.rsplit_once('.') {
         Some((a, b)) if st.networks.iter().any(|n| n.name == b) => (a, Some(b)),
@@ -1223,6 +1247,99 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             sync_tunnels(c);
             Ok(tunnels_json(c))
         }
+        IpcOp::SshStatus => {
+            let st = c.state.lock().unwrap();
+            Ok(json!({
+                "enabled": st.ssh.enabled,
+                "listen": st.ssh.listen,
+                "open": c.open,
+                "logins": st.ssh.logins.iter().enumerate().map(|(i, r)| json!({
+                    "index": i + 1, "hosts": r.hosts, "users": r.users, "password": r.password, "keys": r.keys.len(),
+                })).collect::<Vec<_>>(),
+                "launchers": st.launchers.iter().map(|l| json!({ "name": l.name, "command": l.command })).collect::<Vec<_>>(),
+            }))
+        }
+        IpcOp::SshPassword { node, user } => {
+            let (login, password, port, _) = login_for(c, &node, user.as_deref())?;
+            Ok(json!({ "login": login, "password": password, "host": "127.0.0.1", "port": port }))
+        }
+        IpcOp::SshLoginAdd { hosts, users, password, key } => {
+            let password_given = password.is_some();
+            if let Some(k) = &key {
+                russh::keys::PublicKey::from_openssh(k.trim()).map_err(|e| anyhow!("not an OpenSSH public key: {e}"))?;
+            }
+            let rule = crate::ssh::LoginRule {
+                hosts: if hosts.is_empty() { vec!["*".into()] } else { hosts },
+                users: if users.is_empty() { vec!["*".into()] } else { users },
+                password: password.unwrap_or_else(crate::ssh::new_password),
+                keys: key.into_iter().map(|k| k.trim().to_string()).collect(),
+            };
+            let same = |a: &[String], b: &[String]| {
+                let (mut a, mut b) = (a.to_vec(), b.to_vec());
+                a.sort();
+                b.sort();
+                a == b
+            };
+            let (index, shown) = {
+                let mut st = c.state.lock().unwrap();
+                // Same machines and users as an existing rule: add the key / set the password there.
+                if let Some(i) = st.ssh.logins.iter().position(|r| same(&r.hosts, &rule.hosts) && same(&r.users, &rule.users)) {
+                    let existing = &mut st.ssh.logins[i];
+                    for k in &rule.keys {
+                        if !existing.keys.contains(k) {
+                            existing.keys.push(k.clone());
+                        }
+                    }
+                    if password_given {
+                        existing.password = rule.password.clone();
+                    }
+                    (i + 1, existing.clone())
+                } else {
+                    st.ssh.logins.push(rule.clone());
+                    (st.ssh.logins.len(), rule)
+                }
+            };
+            c.save();
+            Ok(json!({ "index": index, "hosts": shown.hosts, "users": shown.users, "password": shown.password }))
+        }
+        IpcOp::SshLoginRemove { index } => {
+            {
+                let mut st = c.state.lock().unwrap();
+                if index == 0 || index > st.ssh.logins.len() {
+                    bail!("no login rule {index} (see `gangli ssh status`)");
+                }
+                st.ssh.logins.remove(index - 1);
+            }
+            c.save();
+            Ok(json!({ "removed": index }))
+        }
+        IpcOp::Launch { node, launcher, user } => {
+            let (login, password, port, node_name) = login_for(c, &node, user.as_deref())?;
+            let (name, command) = {
+                let st = c.state.lock().unwrap();
+                let l = match &launcher {
+                    Some(n) => st.launchers.iter().find(|l| l.name.eq_ignore_ascii_case(n)),
+                    None => st.launchers.first(),
+                }
+                .ok_or_else(|| anyhow!("no launcher {} in gangli.console", launcher.clone().unwrap_or_default()))?;
+                (l.name.clone(), l.command.clone())
+            };
+            let (u, _) = crate::ssh::parse_login(&login);
+            let argv = crate::ssh::fill(
+                &command,
+                &[
+                    ("login", login.clone()),
+                    ("login_url", crate::ssh::url_encode(&login)),
+                    ("password", password.clone()),
+                    ("password_url", crate::ssh::url_encode(&password)),
+                    ("port", port.to_string()),
+                    ("node", node_name.clone()),
+                    ("user", u),
+                    ("host", "127.0.0.1".into()),
+                ],
+            );
+            Ok(json!({ "launcher": name, "argv": argv, "gateway_open": c.open }))
+        }
         IpcOp::Stop => {
             c.stop.notify_one();
             Ok(json!({ "stopping": true }))
@@ -1286,4 +1403,22 @@ pub fn run_once(op: IpcOp) -> Result<Value> {
         r
     });
     r
+}
+
+/// The login string, password and gateway port for `user` on a machine (best `[[ssh.login]]` rule).
+fn login_for(c: &Console, node: &str, user: Option<&str>) -> Result<(String, String, u16, String)> {
+    let (net, net_name, id) = find_node(c, node)?;
+    let name = c.node_name(&net, &id).unwrap_or_default();
+    let st = c.state.lock().unwrap();
+    let ambiguous = st.networks.iter().filter(|n| n.nodes.iter().any(|x| x.name == name)).count() > 1;
+    let target = if ambiguous { format!("{name}.{net_name}") } else { name.clone() };
+    let login = match user {
+        Some(u) => format!("{u}+{target}"),
+        None => target,
+    };
+    let names = vec![name.clone(), format!("{name}.{net_name}"), id];
+    let rule = crate::ssh::rule_for(&st.ssh.logins, &names, user.unwrap_or("default"))
+        .ok_or_else(|| anyhow!("no [[ssh.login]] rule allows {login}: `gangli ssh login add`"))?;
+    let port = st.ssh.listen.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(2222);
+    Ok((login, rule.password.clone(), port, name))
 }

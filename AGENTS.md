@@ -57,6 +57,9 @@ src/console.rs        console (open or one-shot): live sessions, admission, sync
 src/console_cmd.rs    console-side commands (network, nodes, info, forget, console)
 src/ipc.rs            CLI ↔ open console (local HTTP + internal token), else a one-shot console
 src/http.rs           minimal HTTP/1.1 of the local API (no dependency)
+src/ssh.rs            console SSH gateway (russh): user+machine logins, rules, launchers, forwards
+src/proc.rs           node: shell / command with ConPTY or /dev/ptmx, as system / desktop / a user
+src/sftp.rs           SFTP v3 server, run by the node as `gangli sftp-server` in the user's process
 src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
 src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
 src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers

@@ -34,6 +34,11 @@ pub enum IpcOp {
     TunnelAdd { name: String, node: String, target: String, listen: Option<String> },
     TunnelRemove { name: String },
     TunnelSet { name: String, enabled: bool },
+    SshStatus,
+    SshPassword { node: String, user: Option<String> },
+    SshLoginAdd { hosts: Vec<String>, users: Vec<String>, password: Option<String>, key: Option<String> },
+    SshLoginRemove { index: usize },
+    Launch { node: String, launcher: Option<String>, user: Option<String> },
     Stop,
 }
 
@@ -45,6 +50,9 @@ impl IpcOp {
             IpcOp::NetworkCreate { .. } | IpcOp::NetworkAdd { .. } | IpcOp::NetworkCodes { .. } | IpcOp::NetworkRemove { .. } | IpcOp::Forget { .. } => Some("admin"),
             IpcOp::TunnelList => Some("read"),
             IpcOp::TunnelAdd { .. } | IpcOp::TunnelRemove { .. } | IpcOp::TunnelSet { .. } => Some("admin"),
+            // They show passwords.
+            IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } => Some("admin"),
+            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::Stop => None,
         }
     }

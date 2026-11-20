@@ -459,6 +459,10 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     }
                 });
             }
+            Req::Shell { user, command, pty, term } if authed => {
+                let term = if term.is_empty() { "xterm-256color".to_string() } else { term };
+                tokio::spawn(run_shell(send, recv, crate::proc::Spec { user, command, pty, term }));
+            }
             Req::Info if authed => {
                 let inventory = collect().await;
                 let _ = proto::write_frame(&mut send, &Resp::Info { node_name: my_name.clone(), inventory }).await;
@@ -515,3 +519,60 @@ async fn session<W, R>(
     sessions.remove(id);
     writer.abort();
 }
+
+/// A console session: the process runs as the requested user; its stdin / stdout / stderr / exit travel as
+/// binary frames. The session going away kills the process.
+async fn run_shell<W, R>(mut send: W, mut recv: R, spec: crate::proc::Spec)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    use crate::proc::{In, Out};
+    use crate::proto::sframe;
+    let who = spec.user.clone();
+    let child = match tokio::task::spawn_blocking(move || crate::proc::spawn(&spec)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            let _ = proto::write_frame(&mut send, &Resp::Error { message: format!("{e:#}") }).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+            return;
+        }
+        Err(_) => return,
+    };
+    if proto::write_frame(&mut send, &Resp::Started).await.is_err() {
+        return;
+    }
+    log_line(&format!("session opened as {who}"));
+    let crate::proc::Child { input, mut output } = child;
+    let reader = tokio::spawn(async move {
+        loop {
+            let msg = match sframe::read(&mut recv).await {
+                Ok((sframe::DATA, d)) => In::Data(d),
+                Ok((sframe::RESIZE, b)) if b.len() == 4 => In::Resize(u16::from_be_bytes([b[0], b[1]]), u16::from_be_bytes([b[2], b[3]])),
+                Ok((sframe::EOF, _)) => In::Eof,
+                Ok(_) => continue,
+                Err(_) => break,
+            };
+            if input.send(msg).is_err() {
+                break;
+            }
+        }
+        // `input` dropped here: the process is killed if still running.
+    });
+    while let Some(o) = output.recv().await {
+        let r = match o {
+            Out::Stdout(d) => sframe::write(&mut send, sframe::DATA, &d).await,
+            Out::Stderr(d) => sframe::write(&mut send, sframe::STDERR, &d).await,
+            Out::Exit(code) => {
+                let _ = sframe::write(&mut send, sframe::EXIT, &code.to_be_bytes()).await;
+                break;
+            }
+        };
+        if r.is_err() {
+            break;
+        }
+    }
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+    reader.abort();
+}
+
