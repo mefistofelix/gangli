@@ -19,10 +19,10 @@ const REFRESH: Duration = Duration::from_secs(2);
 const REFRESH_HIDDEN: Duration = Duration::from_secs(8);
 const TOAST: Duration = Duration::from_secs(6);
 
-const GREEN: Color32 = Color32::from_rgb(34, 170, 90);
+pub(super) const GREEN: Color32 = Color32::from_rgb(34, 170, 90);
 const AMBER: Color32 = Color32::from_rgb(220, 140, 20);
 const RED: Color32 = Color32::from_rgb(220, 60, 60);
-const GREY: Color32 = Color32::from_rgb(140, 140, 140);
+pub(super) const GREY: Color32 = Color32::from_rgb(140, 140, 140);
 const ACCENT: Color32 = Color32::from_rgb(20, 140, 130);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -577,7 +577,7 @@ impl App {
                 if !filter.is_empty() && !hay.contains(&filter) {
                     continue;
                 }
-                dot(ui, if n.online { GREEN } else { GREY });
+                super::identicon::avatar(ui, &n.id, 22.0, Some(n.online));
                 let sel = self.selected.as_deref() == Some(n.id.as_str());
                 if ui.selectable_label(sel, RichText::new(&n.name).strong()).clicked() {
                     self.selected = if sel { None } else { Some(n.id.clone()) };
@@ -611,7 +611,8 @@ impl App {
         let inv = n.inventory.clone().unwrap_or_default();
         let tgt = target(&n);
         ui.horizontal(|ui| {
-            dot(ui, if n.online { GREEN } else { GREY });
+            super::identicon::avatar(ui, &n.id, 34.0, Some(n.online));
+            ui.add_space(4.0);
             ui.heading(&n.name);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button("×").clicked() {
@@ -1017,8 +1018,17 @@ impl App {
     // ----- This computer -----
 
     fn computer(&mut self, ui: &mut Ui) {
-        ui.heading("This computer");
-        ui.label(RichText::new(crate::version_line()).weak());
+        let me = s(&self.status["console_id"]).to_string();
+        ui.horizontal(|ui| {
+            if !me.is_empty() {
+                super::identicon::avatar(ui, &me, 34.0, None);
+                ui.add_space(4.0);
+            }
+            ui.vertical(|ui| {
+                ui.heading("This computer");
+                ui.label(RichText::new(crate::version_line()).weak());
+            });
+        });
         ui.add_space(8.0);
         ui.label(RichText::new("Managed from a console (node)").strong());
         let busy = self.node.job.is_some();

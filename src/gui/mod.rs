@@ -14,6 +14,7 @@ mod app;
 mod autostart;
 mod client;
 mod icon;
+mod identicon;
 mod png;
 
 #[cfg(any(windows, target_os = "macos"))]
