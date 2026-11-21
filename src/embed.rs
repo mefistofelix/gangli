@@ -84,8 +84,8 @@ mod tests {
         std::fs::write(&src, b"\x7fELF fake binary body").unwrap();
         assert_eq!(read_trailer(&src), None);
         let out = dir.join("packed");
-        pack(&src, &out, "examplecode").unwrap();
-        assert_eq!(read_trailer(&out).as_deref(), Some("examplecode"));
+        pack(&src, &out, "examplecode1").unwrap();
+        assert_eq!(read_trailer(&out).as_deref(), Some("examplecode1"));
         // re-pack replaces the code instead of stacking
         let out2 = dir.join("packed2");
         pack(&out, &out2, "examplecode2").unwrap();
