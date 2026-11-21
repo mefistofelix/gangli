@@ -52,12 +52,13 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
 ## 3. Identity, keys, codes **[decided 2026-11-20]**
 
 - **A network is its key** (Ed25519). `gangli network create home` (or the GUI) makes one and shows two
-  codes:
-  - **public code** `gangli-pub-…` (90 chars): network id + join secret. For the machines to manage, also
-    embedded in a binary (`gangli pack`). It lets a machine become a node, nothing more. Fixed per network.
-  - **private code** `gangli-key-…`: the network key itself (with a checksum against typos). Pasted into
-    a console (`gangli network add`, or the GUI) it makes that console an owner: **full control**. All
-    consoles holding it are equal; there is no primary.
+  codes, each a bare base32 string, no prefix **[decided 2026-11-21]** (a first byte inside tells them apart
+  and `decode` refuses one where the other is expected; the public one is the longer of the two):
+  - **public code** (79 chars): network id + join secret. For the machines to manage, also embedded in a
+    binary (`gangli pack`). It lets a machine become a node, nothing more. Fixed per network.
+  - **private code** (60 chars): the network key itself (with a checksum against typos). Pasted into a
+    console (`gangli network add`, or the GUI) it makes that console an owner: **full control**. All consoles
+    holding it are equal; there is no primary.
 - The join secret and the directory key are derived from the network key (deterministic Ed25519 signatures
   over fixed labels), so every owner console derives the same values.
 - Every node has a **node key**, every console a **console key** (also their iroh endpoint ids), generated
@@ -118,16 +119,22 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
   starts, when its LAN addresses change, and 5 s after a session drops: a machine that comes online
   appears at once. Offline nodes are retried by the console only every 5 minutes as a safety net; those
   attempts never reach the node (it is off).
-- **Idle cost**: per online node a 50-byte ping every 25 s. The node checks its own inventory every minute
-  *locally* and pushes it only when its stable part (OS, IPs, users, disks, memory size, version) changed.
-  Changing values (free memory, free disk, uptime) are asked for on demand (`gangli info`).
-- **Directory**: one pkarr record per network, signed by the network key, on the Mainline DHT and pkarr
-  HTTP relays (no server of ours): network name, up to 3 console ids in clear (for nodes), the first 8 node
-  ids encrypted with the derived directory key (for consoles), and the number of pages: further records
-  under keys derived from the network key, 12 more encrypted node ids each (up to 16 pages). Consoles republish it when it changes and every
-  30 minutes while open. It is read on events only: a console that opens (or gets a private code) reads it
-  and syncs node, console and removed lists with the consoles listed there; a node reads it while waiting
-  for admission, and once when none of its known consoles answers at start.  
+- **Idle cost**: per online node a 50-byte ping every 25 s. Inventory is **never published anywhere**: a
+  console asks a node for it over their authenticated session (the node pushes its stable part — OS, IPs,
+  users, disks, memory size, version — when it changes, and the changing values, free memory / disk / uptime,
+  on demand for `gangli info`). So everything descriptive about a machine lives only between that machine and
+  an owner console, never on the DHT.
+- **Directory** — **only what is needed to connect, nothing descriptive** **[decided 2026-11-21]**: one pkarr
+  record per network, signed by the network key, on the Mainline DHT and pkarr HTTP relays (no server of
+  ours). It holds **no network name and no inventory**, only ids: up to 3 console ids in clear (a node needs
+  them to find a console to knock), the first 8 node ids encrypted with the derived directory key (so only an
+  owner console sees which machines exist), and the number of pages: further records under keys derived from
+  the network key, 12 more encrypted node ids each (up to 16 pages). Nodes cannot write it (they lack the
+  network key); a console publishes a node's id there only after the node has knocked and been admitted.
+  Consoles republish it when it changes and every 30 minutes while open. It is read on events only: a console
+  that opens (or gets a private code) reads it, learns which nodes exist, dials them and gets everything else
+  live; a node reads it while waiting for admission, and once when none of its known consoles answers at
+  start. The network's name is a console-side label, not in the directory.  
 - **CLI with no open console**: the command runs a one-shot console in its own process (dials the machines
   in parallel, reads the directory, a few seconds), then exits. With an open console the CLI asks it over
   127.0.0.1 with a token from an owner-only file and answers at once. Nothing is ever left running.
@@ -167,6 +174,25 @@ logins, `user+machine`, commands with exit codes, interactive PowerShell in ConP
 `ssh -L`. Not verified yet: Linux / macOS nodes (built and unit-tested only), the `desktop` user through a
 SYSTEM service, the PuTTY / WinSCP launchers. Sessions and forwards are resumable streams: they survive
 dropped connections (grace: 24 h for sessions, 15 min for forwards).
+
+**Why the SSH server is on the console, not on each node** **[decided, reaffirmed 2026-11-21]**: the node
+speaks only gangli's own protocol over iroh and runs no SSH server; the console terminates SSH locally and
+opens a gangli session (`Req::Shell` / forward) to the node. The alternative — an sshd on every node, reached
+through an iroh-forwarded port — was rejected:
+- **One binary, every OS.** No dependency on an sshd being installed and configured on the node (Windows
+  especially); the node spawns the PTY itself (`proc.rs`: ConPTY / `openpty`) and impersonates the right user
+  with OS tokens / uid, the same way everywhere. Login rules, launchers and the `user+machine` convention
+  live in one place (the console), not in an `authorized_keys` on each machine.
+- **No inbound port on the node**, and nothing to brute-force there: the node accepts only an authenticated
+  gangli peer (a console certificate). SSH auth is just a local gate between the client and the console on
+  `127.0.0.1`.
+- **Invisible reconnection.** The gangli session is a resumable stream: a dropped iroh connection is repaired
+  under the client, the SSH session survives. A real sshd on the node has no session resume — a drop would
+  kill it, breaking a core goal (mobile / flaky links).
+- The one trade-off: it is not end-to-end SSH, so the console sees the session in clear. That is fine — the
+  console **is** the owner (it holds the private key, it is your trust anchor), and the console↔node hop is
+  itself authenticated and encrypted by iroh (QUIC/TLS). What you lose is the node's own sshd host-key
+  identity, which gangli replaces with the certificate check.
 
 The open console runs an SSH server (russh) on `127.0.0.1:2222` (configurable). Any SSH client — PuTTY,
 OpenSSH, WinSCP, VS Code Remote, an LLM's `ssh` — connects there. The host is always `127.0.0.1`, so **the

@@ -605,7 +605,7 @@ impl Console {
         let key = store::secret_from_hex(&n.key).ok()?;
         let mut nodes: Vec<&NodeRec> = n.nodes.iter().filter(|x| !n.removed.contains(&x.id)).collect();
         nodes.sort_by_key(|x| std::cmp::Reverse((live.contains_key(&x.id), x.last_seen)));
-        Some((key, Directory { name: n.name.clone(), consoles: self.console_ids(n), nodes: nodes.into_iter().map(|x| x.id.clone()).collect() }))
+        Some((key, Directory { consoles: self.console_ids(n), nodes: nodes.into_iter().map(|x| x.id.clone()).collect() }))
     }
 }
 
@@ -1189,9 +1189,8 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 bail!("this is a public code: it is for the machines to manage (`gangli node --code`), a console needs the private one");
             };
             let net = key.public().to_string();
-            // The directory may carry the network's name.
-            let dir_name = directory::resolve(&key.public(), Some(&key)).await.ok().map(|d| d.name).filter(|n| !n.is_empty());
-            let name = add_network(c, key, name.or(dir_name))?;
+            // The directory holds no name (only what is needed to connect); the console names the network.
+            let name = add_network(c, key, name)?;
             c.save();
             clog(&format!("network {name} added"));
             refresh_network(c, &net, true).await;

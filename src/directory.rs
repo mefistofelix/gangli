@@ -3,10 +3,11 @@
 //! - a console that only has the private code find the other consoles and the nodes;
 //! - a new node that only has the public code find a console to knock on.
 //!
-//! Content: network name and up to [`MAX_CONSOLES`] console ids in clear (nodes need them), the first
-//! [`MAX_NODES`] node ids encrypted with a key derived from the network key (only consoles read them),
-//! and the number of pages: further records, under keys derived from the network key, with 12 more
-//! encrypted node ids each.
+//! **Only what is needed to connect** is published, nothing descriptive (no network name, no inventory): up
+//! to [`MAX_CONSOLES`] console ids in clear (nodes need them to knock), the first [`MAX_NODES`] node ids
+//! encrypted with a key derived from the network key (only consoles read them), and the number of pages:
+//! further records, under keys derived from the network key, with 12 more encrypted node ids each. Everything
+//! about a machine (name, system, disks…) is learned by a console over the authenticated session, never here.
 //! The record is written only by consoles; it is read on events (start, pending admission, all known
 //! consoles unreachable), never polled.
 
@@ -27,15 +28,13 @@ pub const MAX_CONSOLES: usize = 3;
 pub const MAX_NODES: usize = 8;
 const PAGE_NODES: usize = 12;
 const MAX_PAGES: usize = 16;
-const MAX_NAME: usize = 16;
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const NAME: &str = "_gangli";
 const TTL: u32 = 300;
 const CHUNK: usize = 240;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Directory {
-    pub name: String,
     /// Most recently active first.
     pub consoles: Vec<String>,
     /// Most recently seen first; only the first [`MAX_NODES`] are readable without the pages.
@@ -93,14 +92,12 @@ fn pages_of(d: &Directory) -> Vec<Vec<String>> {
     d.nodes.iter().skip(MAX_NODES).cloned().collect::<Vec<_>>().chunks(PAGE_NODES).take(MAX_PAGES).map(|c| c.to_vec()).collect()
 }
 
-/// Main record: `version | name_len | name | n_consoles | consoles | n_pages | nonce | encrypted nodes`.
+/// Main record: `version | n_consoles | consoles | n_pages | nonce | encrypted nodes`.
 pub fn encode(key: &SecretKey, d: &Directory) -> Result<Vec<u8>> {
-    let name: String = d.name.chars().take(MAX_NAME).collect();
     let consoles: Vec<String> = d.consoles.iter().take(MAX_CONSOLES).cloned().collect();
     let consoles = ids_to_bytes(&consoles);
     let first: Vec<String> = d.nodes.iter().take(MAX_NODES).cloned().collect();
-    let mut out = vec![VERSION, name.len() as u8];
-    out.extend_from_slice(name.as_bytes());
+    let mut out = vec![VERSION];
     out.push((consoles.len() / 32) as u8);
     out.extend_from_slice(&consoles);
     out.push(pages_of(d).len() as u8);
@@ -114,9 +111,7 @@ pub fn decode_main(blob: &[u8], key: Option<&SecretKey>) -> Result<(Directory, u
     if blob.first() != Some(&VERSION) {
         bail!("unknown directory version");
     }
-    let name_len = *blob.get(1).ok_or_else(bad)? as usize;
-    let name = std::str::from_utf8(blob.get(2..2 + name_len).ok_or_else(bad)?).map_err(|_| bad())?.to_string();
-    let mut p = 2 + name_len;
+    let mut p = 1;
     let nc = *blob.get(p).ok_or_else(bad)? as usize;
     p += 1;
     let consoles = bytes_to_ids(blob.get(p..p + nc * 32).ok_or_else(bad)?);
@@ -127,7 +122,7 @@ pub fn decode_main(blob: &[u8], key: Option<&SecretKey>) -> Result<(Directory, u
         Some(k) => bytes_to_ids(&open(k, blob.get(p..).ok_or_else(bad)?)?),
         None => vec![],
     };
-    Ok((Directory { name, consoles, nodes }, pages))
+    Ok((Directory { consoles, nodes }, pages))
 }
 
 pub fn decode(blob: &[u8], key: Option<&SecretKey>) -> Result<Directory> {
@@ -215,12 +210,12 @@ mod tests {
     fn roundtrip_and_privacy() {
         let key = SecretKey::generate();
         let ids = |n: usize| (0..n).map(|_| SecretKey::generate().public().to_string()).collect::<Vec<_>>();
-        let d = Directory { name: "home".into(), consoles: ids(2), nodes: ids(8) };
+        let d = Directory { consoles: ids(2), nodes: ids(8) };
         let blob = encode(&key, &d).unwrap();
         // full lists fit the 1000-byte record even without DNS name compression
-        let full = Directory { name: "x".repeat(40), consoles: ids(9), nodes: ids(30) };
+        let full = Directory { consoles: ids(9), nodes: ids(30) };
         let n = BASE32_NOPAD.encode(&encode(&key, &full).unwrap()).len();
-        assert!(n < 660, "{n}");
+        assert!(n < 640, "{n}");
         assert_eq!(decode(&blob, Some(&key)).unwrap(), d);
         // without the key: consoles yes, nodes no
         let public = decode(&blob, None).unwrap();
@@ -234,18 +229,17 @@ mod tests {
     fn caps_lists() {
         let key = SecretKey::generate();
         let ids = |n: usize| (0..n).map(|_| SecretKey::generate().public().to_string()).collect::<Vec<_>>();
-        let d = Directory { name: "a-very-long-network-name-that-is-cut".into(), consoles: ids(9), nodes: ids(30) };
+        let d = Directory { consoles: ids(9), nodes: ids(30) };
         let back = decode(&encode(&key, &d).unwrap(), Some(&key)).unwrap();
         assert_eq!(back.consoles.len(), MAX_CONSOLES);
         assert_eq!(back.nodes.len(), MAX_NODES);
-        assert_eq!(back.name.len(), MAX_NAME);
     }
 
     #[test]
     fn pages_hold_the_rest_and_fit() {
         let key = SecretKey::generate();
         let ids = |n: usize| (0..n).map(|_| SecretKey::generate().public().to_string()).collect::<Vec<_>>();
-        let d = Directory { name: "home".into(), consoles: ids(1), nodes: ids(30) };
+        let d = Directory { consoles: ids(1), nodes: ids(30) };
         let pages = pages_of(&d);
         assert_eq!(pages.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![12, 10]);
         let (main, n) = decode_main(&encode(&key, &d).unwrap(), Some(&key)).unwrap();

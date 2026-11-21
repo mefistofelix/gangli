@@ -1,8 +1,10 @@
-//! A network *is* its key (section 3 of docs/ARCHITECTURE.md). Two codes come out of it:
-//! - the **public code** (`gangli-pub-…`): network id + join secret. Given to machines to manage (also
-//!   embedded in a binary). It lets a machine become a node, nothing more.
-//! - the **private code** (`gangli-key-…`): the network key itself. Pasted into a console, it makes that
-//!   console an owner of the network: full control. Never give it away.
+//! A network *is* its key (section 3 of docs/ARCHITECTURE.md). Two codes come out of it, each a bare base32
+//! string (no prefix): a first byte inside tells them apart, and `decode` refuses one where the other is
+//! expected.
+//! - the **public code**: network id + join secret. Given to machines to manage (also embedded in a binary).
+//!   It lets a machine become a node, nothing more. (the longer code)
+//! - the **private code**: the network key itself. Pasted into a console, it makes that console an owner of
+//!   the network: full control. Never give it away. (the shorter code)
 //!
 //! The join secret and the directory key are derived from the network key with deterministic Ed25519
 //! signatures over fixed labels, so every console holding the key derives the same values.
@@ -11,8 +13,6 @@ use anyhow::{bail, Result};
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use iroh::{PublicKey, SecretKey};
 
-const PUB_PREFIX: &str = "gangli-pub-";
-const KEY_PREFIX: &str = "gangli-key-";
 const KIND_PUBLIC: u8 = 1;
 const KIND_PRIVATE: u8 = 2;
 
@@ -41,7 +41,7 @@ pub fn public_code(key: &SecretKey) -> String {
     let mut raw = vec![KIND_PUBLIC];
     raw.extend_from_slice(key.public().as_bytes());
     raw.extend_from_slice(&join_secret(key));
-    format!("{PUB_PREFIX}{}", BASE32_NOPAD.encode(&raw).to_ascii_lowercase())
+    BASE32_NOPAD.encode(&raw).to_ascii_lowercase()
 }
 
 /// Network key + the first 4 bytes of its public half, so a mistyped private code is refused instead of
@@ -50,17 +50,14 @@ pub fn private_code(key: &SecretKey) -> String {
     let mut raw = vec![KIND_PRIVATE];
     raw.extend_from_slice(&key.to_bytes());
     raw.extend_from_slice(&key.public().as_bytes()[..4]);
-    format!("{KEY_PREFIX}{}", BASE32_NOPAD.encode(&raw).to_ascii_lowercase())
+    BASE32_NOPAD.encode(&raw).to_ascii_lowercase()
 }
 
 pub fn decode(s: &str) -> Result<Code> {
+    // Tolerant to spaces, case, and a leftover `gangli-pub-` / `gangli-key-` prefix from an old copy.
     let s: String = s.trim().chars().filter(|c| !c.is_whitespace()).collect();
     let lower = s.to_ascii_lowercase();
-    let body = lower
-        .strip_prefix(PUB_PREFIX)
-        .or_else(|| lower.strip_prefix(KEY_PREFIX))
-        .unwrap_or(&lower)
-        .to_ascii_uppercase();
+    let body = lower.strip_prefix("gangli-pub-").or_else(|| lower.strip_prefix("gangli-key-")).unwrap_or(&lower).to_ascii_uppercase();
     let Ok(raw) = BASE32_NOPAD.decode(body.as_bytes()) else {
         bail!("not a gangli code (bad characters)");
     };
@@ -92,26 +89,31 @@ mod tests {
     fn public_roundtrip() {
         let key = SecretKey::generate();
         let s = public_code(&key);
-        assert!(s.starts_with("gangli-pub-"));
-        assert_eq!(s.len(), 11 + 79);
+        // bare base32, no prefix; public is the longer code (49 bytes)
+        assert!(!s.contains('-'));
+        assert_eq!(s.len(), 79);
         let Code::Public { network, join } = decode(&s).unwrap() else { panic!() };
         assert_eq!(network, key.public());
         assert_eq!(join, join_secret(&key));
-        // tolerant to case, spaces and a missing prefix
-        let messy = format!("  {} ", s.to_uppercase().replace("GANGLI-PUB-", ""));
-        assert!(matches!(decode(&messy).unwrap(), Code::Public { .. }));
+        // tolerant to case, spaces and a leftover prefix
+        assert!(matches!(decode(&format!("  {} ", s.to_uppercase())).unwrap(), Code::Public { .. }));
+        assert!(matches!(decode(&format!("gangli-pub-{s}")).unwrap(), Code::Public { .. }));
+        // a public code is refused where a private one is expected (and the other way round)
+        assert!(matches!(decode(&s).unwrap(), Code::Public { .. }));
+        assert!(matches!(decode(&private_code(&key)).unwrap(), Code::Private { .. }));
     }
 
     #[test]
     fn private_roundtrip_and_checksum() {
         let key = SecretKey::generate();
         let s = private_code(&key);
-        assert!(s.starts_with("gangli-key-"));
+        assert!(!s.contains('-'));
+        assert_eq!(s.len(), 60);
         let Code::Private { key: back } = decode(&s).unwrap() else { panic!() };
         assert_eq!(back.public(), key.public());
         // flip one character of the body: refused
         let mut chars: Vec<char> = s.chars().collect();
-        let i = 20;
+        let i = 10;
         chars[i] = if chars[i] == 'a' { 'b' } else { 'a' };
         let bad: String = chars.into_iter().collect();
         assert!(decode(&bad).is_err());

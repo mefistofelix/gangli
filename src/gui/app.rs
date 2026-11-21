@@ -828,7 +828,7 @@ impl App {
         ui.add_space(6.0);
         ui.label(RichText::new("A network you already own (from another console)").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.add_code).password(true).hint_text("private code gangli-key-…").desired_width(300.0));
+            ui.add(egui::TextEdit::singleline(&mut self.f.add_code).password(true).hint_text("private code (the shorter one)").desired_width(300.0));
             if ui.add_enabled(!self.f.add_code.trim().is_empty(), egui::Button::new("Add")).clicked() {
                 self.call(Tag::Done("Network added".into()), IpcOp::NetworkAdd { code: self.f.add_code.trim().to_string(), name: None });
                 self.f.add_code.clear();
@@ -1049,7 +1049,7 @@ impl App {
             }
             let running = self.node.stop.is_some();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("public code gangli-pub-…").desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("public code (the longer one)").desired_width(320.0));
                 if ui.add_enabled(!self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
                     match crate::state::add_join(self.f.node_code.trim()) {
                         Ok(name) => self.toast(format!("joined {name}"), false),

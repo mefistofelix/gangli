@@ -14,7 +14,7 @@ use crate::store;
 const HEADER: &str = "gangli.node — this machine as a managed node (see docs/ARCHITECTURE.md).
 It holds the node's secret key: keep it private. gangli rewrites this file when its state changes
 (comments other than this header are not kept) and picks up edits by hand within 2 seconds.
-Join a network: `gangli join <public code>` or add a [[network]] with only `code = \"gangli-pub-…\"`.";
+Join a network: `gangli join <public code>` or add a [[network]] with only `code = \"<public code>\"`.";
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct State {

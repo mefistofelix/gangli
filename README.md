@@ -35,7 +35,7 @@ Double click opens the window. From a terminal:
 
 ```
 gangli network create family        # on your computer: prints the public and private codes
-gangli node --code gangli-pub-…     # on the machine to manage (or: gangli install --code …)
+gangli node --code <public code>    # on the machine to manage (or: gangli install --code …)
 gangli nodes                        # the machines
 gangli exec nas -- df -h
 gangli --help
