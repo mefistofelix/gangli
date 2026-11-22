@@ -14,9 +14,11 @@ mod inventory;
 mod ipc;
 mod node;
 mod node_cmd;
+mod pair;
 mod paths;
 mod proc;
 mod proto;
+mod qr;
 mod resume;
 mod service;
 mod sftp;
@@ -92,6 +94,12 @@ enum Command {
     },
     /// node: join a network with its public code.
     Join { code: String },
+    /// node: join a network from your phone: shows a QR; scan it with the phone (gangli wallet), pick the network.
+    Pair {
+        /// Minutes to wait for the phone.
+        #[arg(long, default_value_t = 10)]
+        minutes: u64,
+    },
     /// node: leave a network.
     Leave { network: String },
     /// node: this machine's networks.
@@ -191,7 +199,12 @@ enum NetworkCmd {
         name: Option<String>,
     },
     /// Show the public and private codes of a network.
-    Codes { name: String },
+    Codes {
+        name: String,
+        /// Also show the network as a QR for the phone (gangli wallet; the public code only).
+        #[arg(long)]
+        qr: bool,
+    },
     /// Remove a network from this console only.
     Remove { name: String },
 }
@@ -359,6 +372,7 @@ fn main() {
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     #[cfg(windows)]
     elevate::adopt_elevated_output(&mut args);
+    qr::enable_terminal_colours();
 
     // Bare version flags before clap so the build number shows (clap's own version flag is disabled).
     if matches!(args.get(1).and_then(|a| a.to_str()), Some("--version") | Some("-V")) {
@@ -405,11 +419,12 @@ fn main() {
             }
         }
         Some(Command::Join { code }) => node_cmd::join(&code, json),
+        Some(Command::Pair { minutes }) => node_cmd::pair(minutes, json),
         Some(Command::Leave { network }) => node_cmd::leave(&network, json),
         Some(Command::Status) => node_cmd::status(json),
         Some(Command::Network(NetworkCmd::Create { name })) => console_cmd::network_create(&name, json),
         Some(Command::Network(NetworkCmd::Add { code, name })) => console_cmd::network_add(&code, name, json),
-        Some(Command::Network(NetworkCmd::Codes { name })) => console_cmd::network_codes(&name, json),
+        Some(Command::Network(NetworkCmd::Codes { name, qr })) => console_cmd::network_codes(&name, qr, json),
         Some(Command::Network(NetworkCmd::Remove { name })) => console_cmd::network_remove(&name, json),
         Some(Command::Nodes { network }) => console_cmd::nodes(network, json),
         Some(Command::Info { node }) => console_cmd::info(&node, json),

@@ -45,12 +45,22 @@ pub fn network_add(code: &str, name: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn network_codes(name: &str, json: bool) -> Result<()> {
+pub fn network_codes(name: &str, qr: bool, json: bool) -> Result<()> {
     let v = ipc::call(IpcOp::NetworkCodes { name: name.to_string() })?;
+    let url = crate::pair::network_url(v["public_code"].as_str().unwrap_or(""), v["network"].as_str().unwrap_or(name));
     if json {
+        let mut v = v;
+        v["wallet_url"] = json!(url);
         print_json(&v);
     } else {
         print_codes(&v);
+    }
+    if qr {
+        // The public code only: a private code never goes into a QR (or a phone).
+        eprint!(
+            "\n{}Scan it with your phone's camera to keep this network in the gangli wallet (public code only).\n",
+            crate::qr::terminal(&url)
+        );
     }
     Ok(())
 }

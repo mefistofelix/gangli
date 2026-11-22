@@ -346,6 +346,28 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     **[verify early]**; fallback: code in a file next to the binary.
   - Binaries are unsigned; the owner guides relatives through SmartScreen / Gatekeeper the first time
     **[decided]**.
+- **Joining from a phone** (`pair.rs`, `qr.rs`, `web/index.html`) **[decided 2026-11-22]**: no code to type,
+  no camera on the machine, no port anywhere.
+  - The **gangli wallet** is a static web page (GitHub Pages of this repository,
+    https://mefistofelix.github.io/gangli/) that keeps, in the phone's browser storage, **public codes only**
+    (several networks). A console's *Codes* dialog (and `gangli network codes NAME --qr`) shows a QR with the
+    wallet's address and `#net=<public code>&name=…`: scanned with the phone's camera, the wallet opens and
+    keeps that network. Private codes are never put in a QR, and the wallet refuses them.
+  - On the machine: *This computer → Pair with your phone* (or `gangli pair`) shows a QR with the wallet's
+    address and `#pair=<random 32-byte seed>`. Scanned with the phone's camera, the wallet opens; you pick a
+    network. The wallet encrypts that network's public code with AES-256-GCM under
+    `SHA-256("gangli-pair-v1" | seed)` and publishes `nonce | ciphertext` on the **pkarr relays** (TXT `_gangli`,
+    the directory's format), signed by the ed25519 key whose seed is the seed. The machine polls that key
+    **only while its QR is on screen** (every 3 s, at most 10 minutes), decrypts, checks that it is a public
+    code, and joins; a console of the network then admits it as for any join.
+  - Why it is safe: the relays see a random key and ciphertext; only who saw the machine's screen holds the
+    seed, so nobody else can send it a network; only a public code ever travels (the power to *ask* to join).
+    Why this way: a browser cannot speak iroh, and anything it can speak to a machine directly (HTTP,
+    WebSocket) would need a port opened on it; a mailbox on public relays both reach outward needs none, and
+    pkarr is already gangli's rendezvous (its relays allow browsers: CORS). The wallet has no dependency
+    (WebCrypto: Ed25519, AES-GCM, SHA-256), and its Content-Security-Policy lets it talk only to the two pkarr
+    relays. Fixed test vectors are shared by `pair.rs` and the wallet (`#selftest`).
+  - `GANGLI_WALLET_URL` points the QR codes at another copy of the page (tests: a local server).
 
 ## 11. Updates (`update.rs`)
 
@@ -371,13 +393,14 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     filter; a machine's panel: a **terminal inside the window** ("Terminal here"), or each launcher (PuTTY,
     OpenSSH, WinSCP…), as a chosen user and optionally in a persistent terminal; copy the gateway password or an `ssh` command line, its persistent
     terminals (open / close), its tunnels (add), inventory, update from a release folder, forget;
-  - *Networks*: create (dialog with the public code, and the private one hidden until asked), codes, add one
-    with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
+  - *Networks*: create (dialog with the network's QR for the phone wallet, the public code, and the private
+    one hidden until asked), codes, add one with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
     embedded next to it, for a relative;
   - *Tunnels*: list with on / off and state, add, remove;
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
   - *API*: on / off, tokens (made here, shown once; revoke);
-  - *This computer* (node): memberships and admission, join with a public code (prefilled when embedded),
+  - *This computer* (node): memberships and admission, **pair with your phone** (section 10), join with a
+    public code (prefilled when embedded),
     run the node inside the window, install as a service (the same `gangli install`, from where it is), the
     installed service and uninstall; the files gangli keeps. A binary with an embedded code and no console
     network opens on this page.

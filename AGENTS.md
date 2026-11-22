@@ -31,7 +31,10 @@ when a decision changes.
   or in a one-shot CLI process. The node may run by hand or as a service.
 - **No polling of nodes.** Presence comes from live sessions; a node sends traffic only for pings on an open
   session, knocks on events (start, address change, session drop) and inventory changes. A periodic network
-  call from the node is a regression.
+  call from the node is a regression. The one exception: while a pairing QR is on screen (`gangli pair`), the
+  machine polls the relays for the phone's answer (every 3 s, at most 10 minutes).
+- **The phone wallet holds public codes only** and talks only to the pkarr relays; a private code never goes
+  into a QR or a browser.
 - **Portable, two files.** Everything gangli keeps goes in `gangli.node` and `gangli.console` (TOML) next to
   the executable, plus `gangli.log` (`paths.rs`); never a system or user folder, never `%APPDATA%`,
   `~/.config`, `/var/lib`, no lock, port or temp files next to them either. Only the OS service registration is
@@ -64,6 +67,8 @@ src/sftp.rs           SFTP v3 server, run by the node as `gangli sftp-server` in
 src/resume.rs         resumable streams (sessions, forwards survive drops)
 src/term.rs           persistent terminals (alacritty_terminal screen, redraw, state sync)
 src/update.rs         self-update (platform check, swap, restart)
+src/pair.rs           joining from a phone: pairing QR, encrypted answer through the pkarr relays
+src/qr.rs             QR codes (matrix; terminal rendering)
 src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
 src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
 src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers
@@ -75,10 +80,12 @@ src/service/          system service per OS (SCM, launchd, systemd)
 src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the
                       open one), native.rs (eframe + tray-icon: Windows, macOS), x11.rs + raster.rs + sni.rs
                       (Linux: X11 protocol, CPU renderer, D-Bus tray), term.rs (integrated terminal), autostart.rs (login item), icon.rs, png.rs
+web/index.html        the gangli wallet (GitHub Pages): public network codes on the phone, sends one to a machine
 docs/ARCHITECTURE.md  design and decisions
 docs/API.md           the local API for programs and AI agents
 docs/RELAY.md         own iroh relay options for later (free VM, Cloudflare Tunnel, Workers)
 .github/workflows/build.yml  the builds, tests and releases (GitHub Actions of this public repository)
+.github/workflows/pages.yml  publishes web/ on GitHub Pages (the address in the pairing QR codes)
 scripts/ci.sh            runs that workflow from here, waits, downloads the results into out/ci/<os>/
 scripts/ci-build.sh      the build of one OS on its runner
 scripts/ci-test.sh       end-to-end test on the runner (service, console, exec, GUI, update, uninstall)

@@ -22,6 +22,9 @@ A network is a key: whoever has its private code owns it; its public code only l
   token can do everything the window does: list and identify the machines, run commands, connect over SSH
   with any client, make tunnels ([docs/API.md](docs/API.md)).
 - SSH keys instead of passwords: with your Pageant key in the gateway, PuTTY and WinSCP log in by themselves.
+- Joining from your phone, no code to type: scan a network's QR on your computer once with the
+  [gangli wallet](https://mefistofelix.github.io/gangli/) (a web page that keeps public codes only), then scan
+  the QR a machine shows (*Pair with your phone*, or `gangli pair`) and pick the network.
 - Updates sent from the console to the machines.
 - Portable: everything it keeps is in `gangli.node` and `gangli.console` next to the binary.
 

@@ -39,6 +39,8 @@ enum Page {
 enum Modal {
     Codes { network: String, public: String, private: String, show_private: bool },
     Token { name: String, token: String, url: String, instructions: String },
+    /// Joining from a phone: the QR shown, the answer when it comes (the public code), and a stop flag.
+    Pair { url: String, answer: Arc<Mutex<Option<Result<String, String>>>>, cancel: Arc<AtomicBool> },
     Confirm { text: String, op: IpcOp, done: String },
 }
 
@@ -121,6 +123,25 @@ fn target(n: &NodeView) -> String {
 
 fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
+}
+
+/// A QR code of `text`, black on white whatever the theme (phone cameras want contrast), with a quiet zone.
+/// Modules are whole points, so they stay sharp.
+fn qr_image(ui: &mut Ui, text: &str, size: f32) {
+    let (n, m) = crate::qr::matrix(text);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 6.0, Color32::WHITE);
+    let cell = (size / (n as f32 + 4.0)).floor().max(1.0);
+    let origin = rect.center() - egui::vec2(cell * n as f32, cell * n as f32) / 2.0;
+    for y in 0..n {
+        for x in 0..n {
+            if m[y * n + x] {
+                let r = egui::Rect::from_min_size(origin + egui::vec2(x as f32 * cell, y as f32 * cell), egui::vec2(cell, cell));
+                p.rect_filled(r.expand(0.15), 0.0, Color32::BLACK);
+            }
+        }
+    }
 }
 
 fn dot(ui: &mut Ui, color: Color32) {
@@ -229,6 +250,11 @@ impl App {
         if let Ok(t) = std::env::var("GANGLI_GUI_TERM") {
             let name = t.split('.').next().unwrap_or(&t).to_string();
             app.open_term(&t, &name, None, None);
+        }
+        // For tests: show the pairing QR at once.
+        if std::env::var_os("GANGLI_GUI_PAIR").is_some() {
+            app.page = Page::Computer;
+            app.start_pairing();
         }
         app.call(Tag::Ssh, IpcOp::SshStatus);
         app
@@ -342,6 +368,7 @@ impl App {
                 self.node.stop = None;
             }
         }
+        self.finish_pairing();
     }
 
     fn on_reply(&mut self, tag: Tag, r: Result<Value, String>) {
@@ -1058,8 +1085,15 @@ impl App {
                 });
             }
             let running = self.node.stop.is_some();
+            if ui
+                .button(RichText::new("Pair with your phone…").strong())
+                .on_hover_text("Shows a QR: scan it with your phone (gangli wallet) and pick the network — no code to type")
+                .clicked()
+            {
+                self.start_pairing();
+            }
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("public code (the longer one)").desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("or the public code (the longer one)").desired_width(320.0));
                 if ui.add_enabled(!self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
                     match crate::state::add_join(self.f.node_code.trim()) {
                         Ok(name) => self.toast(format!("joined {name}"), false),
@@ -1134,6 +1168,46 @@ impl App {
             reveal(&crate::paths::console_file());
         }
         let _ = exe_dir;
+    }
+
+    /// Show a pairing QR and look for the phone's answer in the background (pair.rs).
+    fn start_pairing(&mut self) {
+        let p = crate::pair::Pairing::new();
+        let url = p.url();
+        let answer = Arc::new(Mutex::new(None));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (a2, c2, wake) = (answer.clone(), cancel.clone(), self.client.waker());
+        std::thread::spawn(move || {
+            let r = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())
+                .and_then(|rt| rt.block_on(p.wait(Duration::from_secs(600), Some(c2))).map_err(|e| format!("{e:#}")));
+            *a2.lock().unwrap() = Some(r);
+            wake();
+        });
+        self.modal = Some(Modal::Pair { url, answer, cancel });
+    }
+
+    /// The phone answered: join that network (through an elevated `gangli join` when the service owns the state).
+    fn finish_pairing(&mut self) {
+        let Some(Modal::Pair { answer, cancel, .. }) = &self.modal else { return };
+        let Some(r) = answer.lock().unwrap().take() else { return };
+        let cancelled = cancel.load(Ordering::SeqCst);
+        self.modal = None;
+        match r {
+            Ok(code) if self.node.installed => {
+                self.start_job(None, vec!["join".into(), code]);
+                self.toast("Network received: confirm the system's request to save it", false);
+            }
+            Ok(code) => match crate::state::add_join(&code) {
+                Ok(name) => self.toast(format!("Joined {name}: a console of that network admits this computer"), false),
+                Err(e) => self.toast(format!("{e:#}"), true),
+            },
+            Err(_) if cancelled => {}
+            Err(e) => self.toast(e, true),
+        }
+        self.read_node();
     }
 
     /// Run gangli (this binary, or the installed one) with `args`, keeping its output for the page.
@@ -1234,6 +1308,17 @@ impl App {
                 Modal::Codes { network, public, private, show_private } => {
                     ui.heading(format!("Network {network}"));
                     ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        qr_image(ui, &crate::pair::network_url(public, network), 150.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Scan with your phone's camera").strong());
+                            ui.label(RichText::new(
+                                "The gangli wallet opens and keeps this network (its public code only). From the phone you \
+                                 can then add machines to it: on a machine, This computer → Pair with your phone.",
+                            ).weak());
+                        });
+                    });
+                    ui.add_space(6.0);
                     ui.label(RichText::new("Public code: for the machines to manage").strong());
                     ui.add(egui::Label::new(RichText::new(public.as_str()).monospace()).wrap());
                     ui.horizontal(|ui| {
@@ -1290,6 +1375,24 @@ impl App {
                 Modal::Confirm { text, .. } => {
                     ui.label(text.as_str());
                 }
+                Modal::Pair { url, .. } => {
+                    ui.heading("Join a network from your phone");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        qr_image(ui, url, 220.0);
+                        ui.vertical(|ui| {
+                            ui.label("1. Scan this with your phone's camera: the gangli wallet opens.");
+                            ui.label("2. Pick the network for this computer.");
+                            ui.label("3. This computer joins by itself; a console of that network admits it.");
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Waiting for the phone…").weak());
+                            });
+                        });
+                    });
+                    ui.add(egui::Label::new(RichText::new(url.as_str()).monospace().small().weak()).wrap());
+                }
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -1308,6 +1411,9 @@ impl App {
         });
         if keep && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.modal = Some(m);
+        } else if let Modal::Pair { cancel, .. } = &m {
+            // Closing the dialog stops looking for the phone.
+            cancel.store(true, Ordering::SeqCst);
         }
     }
 

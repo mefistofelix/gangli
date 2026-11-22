@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Nothing leaves this page but the encrypted pairing message, and only to the pkarr relays. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src https://pkarr.pubky.app https://pkarr.pubky.org; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#14897f">
+<title>gangli wallet</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='14' fill='%2314897f'/%3E%3Cpath d='M18 43 46 43 32 19Z' fill='none' stroke='white' stroke-width='4.5'/%3E%3Ccircle cx='18' cy='43' r='7' fill='white'/%3E%3Ccircle cx='46' cy='43' r='7' fill='white'/%3E%3Ccircle cx='32' cy='19' r='7' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f7; --card: #ffffff; --ink: #1d2322; --weak: #67716f; --line: #dde2e1;
+    --accent: #14897f; --accent-ink: #ffffff; --warn: #b5650c; --bad: #c43c3c; --good: #1f9a55;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151918; --card: #1e2423; --ink: #e8eceb; --weak: #95a09e; --line: #2f3836; --accent: #23a99b; --warn: #e39a3c; --bad: #ef6b6b; --good: #3ccb7c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 18px 16px 6px; max-width: 640px; margin: 0 auto; }
+  header svg { width: 36px; height: 36px; flex: none; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  header p { margin: 0; color: var(--weak); font-size: 13px; }
+  main { max-width: 640px; margin: 0 auto; padding: 8px 16px 40px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin: 12px 0; }
+  .card h2 { font-size: 17px; margin: 0 0 6px; }
+  .weak { color: var(--weak); font-size: 14px; }
+  .net { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .net:first-of-type { border-top: 0; }
+  .net .name { font-weight: 600; }
+  .net .id { color: var(--weak); font: 12px ui-monospace, Consolas, monospace; }
+  .grow { flex: 1; min-width: 0; }
+  button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 10px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.big { width: 100%; text-align: left; margin: 6px 0; padding: 14px; }
+  button.link { border: 0; background: none; color: var(--weak); padding: 6px; font-size: 14px; }
+  button:disabled { opacity: .5; }
+  input { font: 15px ui-monospace, Consolas, monospace; width: 100%; padding: 11px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .msg { margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
+  .msg.ok { background: color-mix(in srgb, var(--good) 15%, transparent); }
+  .msg.err { background: color-mix(in srgb, var(--bad) 15%, transparent); }
+  .msg.info { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  ol { padding-left: 20px; margin: 6px 0; }
+  li { margin: 4px 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="14" fill="#14897f"/><path d="M18 43 46 43 32 19Z" fill="none" stroke="#fff" stroke-width="4.5"/><circle cx="18" cy="43" r="7" fill="#fff"/><circle cx="46" cy="43" r="7" fill="#fff"/><circle cx="32" cy="19" r="7" fill="#fff"/></svg>
+  <div><h1>gangli wallet</h1><p>Your networks' public codes, to add machines from your phone</p></div>
+</header>
+<main>
+  <section class="card" id="pair" hidden>
+    <h2>Add this machine to a network</h2>
+    <p class="weak">Pick the network. The machine receives it in a few seconds and joins; a console of that network then admits it.</p>
+    <div id="pair-list"></div>
+    <div id="pair-msg"></div>
+  </section>
+
+  <section class="card" id="save" hidden>
+    <h2>Keep this network?</h2>
+    <p><span class="name" id="save-name"></span> <span class="weak" id="save-id"></span></p>
+    <div class="row"><button class="primary" id="save-yes">Keep it</button><button id="save-no">No</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Your networks</h2>
+    <div id="list"></div>
+    <div id="msg"></div>
+  </section>
+
+  <section class="card">
+    <h2>Add a network</h2>
+    <p class="weak">On your computer: gangli → Networks → Codes, and scan the QR with the phone's camera. Or paste the <b>public</b> code here.</p>
+    <input id="code" placeholder="public code" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="row"><input id="name" placeholder="name (optional)" autocomplete="off"><button class="primary" id="add">Add</button></div>
+  </section>
+
+  <section class="card">
+    <h2>How it works</h2>
+    <ol class="weak">
+      <li>On the machine to add: gangli → This computer → <b>Pair with your phone</b> (or <code>gangli pair</code>): a QR appears.</li>
+      <li>Scan it with the phone's camera: this page opens. Pick the network.</li>
+      <li>The machine joins; a console of that network admits it.</li>
+    </ol>
+    <p class="weak">This page keeps <b>public codes only</b>, in this browser. A public code can only make a machine ask to join; it cannot reach or control anything. A private code is refused: it never belongs on a phone. The message to the machine is encrypted with a key only its screen showed, and goes through the public pkarr relays.</p>
+  </section>
+</main>
+<script>
+"use strict";
+const STORE = "gangli.networks.v1";
+const RELAYS = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"];
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const Z32 = "ybndrfg8ejkmcpqxot1uwisza345h769";
+const enc = new TextEncoder();
+const $ = (id) => document.getElementById(id);
+
+// ---- encodings (the same as gangli's: RFC 4648 base32 without padding; pkarr's z-base32) ----
+function b32encode(bytes, alphabet) {
+  let out = "", bits = 0, value = 0;
+  for (const b of bytes) {
+    value = ((value << 8) | b) & 0xffff;
+    bits += 8;
+    while (bits >= 5) { out += alphabet[(value >> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return out;
+}
+function b32decode(text) {
+  const out = []; let bits = 0, value = 0;
+  for (const c of text.toUpperCase()) {
+    const i = B32.indexOf(c);
+    if (i < 0) throw new Error("bad characters");
+    value = ((value << 5) | i) & 0xffff;
+    bits += 5;
+    if (bits >= 8) { out.push((value >> (bits - 8)) & 255); bits -= 8; }
+  }
+  return new Uint8Array(out);
+}
+function b64url(s) {
+  const t = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+  return Uint8Array.from(t, (c) => c.charCodeAt(0));
+}
+function cat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+
+// ---- codes: kind byte 1 = public (49 bytes), 2 = private (37 bytes) ----
+function parseCode(text) {
+  let s = (text || "").replace(/\s+/g, "").toLowerCase().replace(/^gangli-(pub|key)-/, "");
+  if (!/^[a-z2-7]+$/.test(s)) return { error: "This is not a gangli code." };
+  let raw; try { raw = b32decode(s); } catch { return { error: "This is not a gangli code." }; }
+  if (raw[0] === 2 && raw.length === 37) return { private: true };
+  if (raw[0] === 1 && raw.length === 49) return { code: s, id: hex(raw.slice(1, 7)) };
+  return { error: "This is not a gangli code." };
+}
+const PRIVATE_REFUSED = "That is a PRIVATE code: it makes whoever holds it an owner of the network. It is not kept here, and it never belongs on a phone. Use the public code (gangli → Networks → Codes → the QR).";
+
+// ---- storage: public codes only ----
+function load() { try { return JSON.parse(localStorage.getItem(STORE) || "[]").filter((n) => parseCode(n.code).code); } catch { return []; } }
+function store(list) { try { localStorage.setItem(STORE, JSON.stringify(list)); return true; } catch { return false; } }
+function keep(code, name) {
+  const p = parseCode(code);
+  if (p.private) throw new Error(PRIVATE_REFUSED);
+  if (p.error) throw new Error(p.error);
+  const list = load().filter((n) => n.code !== p.code);
+  list.push({ name: (name || "").trim().slice(0, 40) || "network " + p.id.slice(0, 4), code: p.code, added: Date.now() });
+  if (!store(list)) throw new Error("This browser does not let the page keep data (private mode?).");
+  return list[list.length - 1];
+}
+
+// ---- pairing (the same derivations as src/pair.rs) ----
+const PKCS8_ED25519 = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+async function pairingKeys(seed) {
+  const sk = await crypto.subtle.importKey("pkcs8", cat(new Uint8Array(PKCS8_ED25519), seed), { name: "Ed25519" }, true, ["sign"]);
+  const pub = b64url((await crypto.subtle.exportKey("jwk", sk)).x);
+  const k = new Uint8Array(await crypto.subtle.digest("SHA-256", cat(enc.encode("gangli-pair-v1"), seed)));
+  return { sk, pub, z32: b32encode(pub, Z32), aes: k };
+}
+function dnsTxtPacket(name, text, ttl) {
+  // a DNS reply (id 0, QR set) with one TXT answer, as pkarr's SignedPacket expects
+  const labels = name.split(".").map((l) => { const b = enc.encode(l); return cat(new Uint8Array([b.length]), b); });
+  const t = enc.encode(text);
+  const rdata = cat(new Uint8Array([t.length]), t);
+  const fixed = new Uint8Array(10), dv = new DataView(fixed.buffer);
+  dv.setUint16(0, 16); dv.setUint16(2, 1); dv.setUint32(4, ttl); dv.setUint16(8, rdata.length);
+  return cat(new Uint8Array([0, 0, 0x80, 0, 0, 0, 0, 1, 0, 0, 0, 0]), ...labels, new Uint8Array([0]), fixed, rdata);
+}
+async function sendToMachine(seedText, code) {
+  if (!crypto.subtle) throw new Error("This page needs a secure (https) connection.");
+  const seed = b32decode(seedText);
+  if (seed.length !== 32) throw new Error("This pairing QR is damaged: show it again on the machine.");
+  let keys;
+  try { keys = await pairingKeys(seed); } catch { throw new Error("This browser cannot sign (Ed25519): update it, or use another browser."); }
+  const aes = await crypto.subtle.importKey("raw", keys.aes, "AES-GCM", false, ["encrypt"]);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aes, enc.encode(code)));
+  const packet = dnsTxtPacket("_gangli." + keys.z32, "a" + b32encode(cat(nonce, sealed), B32), 300);
+  const ts = BigInt(Date.now()) * 1000n;
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, keys.sk, cat(enc.encode(`3:seqi${ts}e1:v${packet.length}:`), packet)));
+  const tsb = new Uint8Array(8); new DataView(tsb.buffer).setBigUint64(0, ts);
+  const body = cat(sig, tsb, packet);
+  const results = await Promise.allSettled(RELAYS.map((r) => fetch(`${r}/${keys.z32}`, { method: "PUT", body, referrerPolicy: "no-referrer" })));
+  if (!results.some((r) => r.status === "fulfilled" && r.value.ok)) {
+    const why = results.map((r) => r.status === "fulfilled" ? r.value.status : "offline").join(", ");
+    throw new Error(`The relays did not take the message (${why}). Check the connection and try again.`);
+  }
+}
+
+// ---- screens ----
+function say(where, kind, text) { $(where).innerHTML = ""; if (!text) return; const d = document.createElement("div"); d.className = "msg " + kind; d.textContent = text; $(where).append(d); }
+function render() {
+  const list = load();
+  const box = $("list"); box.innerHTML = "";
+  if (!list.length) { const p = document.createElement("p"); p.className = "weak"; p.textContent = "No network yet: add one below."; box.append(p); return; }
+  for (const n of list) {
+    const row = document.createElement("div"); row.className = "net";
+    const info = document.createElement("div"); info.className = "grow";
+    const nm = document.createElement("div"); nm.className = "name"; nm.textContent = n.name;
+    const id = document.createElement("div"); id.className = "id"; id.textContent = parseCode(n.code).id;
+    info.append(nm, id);
+    const del = document.createElement("button"); del.className = "link"; del.textContent = "remove";
+    del.onclick = () => { if (confirm(`Remove ${n.name} from this phone? (The network and its machines are not touched.)`)) { store(load().filter((x) => x.code !== n.code)); render(); } };
+    row.append(info, del); box.append(row);
+  }
+}
+function showPair(seed) {
+  $("pair").hidden = false;
+  const box = $("pair-list"); box.innerHTML = "";
+  const list = load();
+  if (!list.length) { say("pair-msg", "info", "No network on this phone yet: on your computer open gangli → Networks → Codes, scan that QR, then scan the machine's QR again."); return; }
+  say("pair-msg", "", "");
+  for (const n of list) {
+    const b = document.createElement("button"); b.className = "big"; b.textContent = n.name;
+    b.onclick = async () => {
+      for (const x of box.querySelectorAll("button")) x.disabled = true;
+      say("pair-msg", "info", `Sending ${n.name} to the machine…`);
+      try {
+        await sendToMachine(seed, n.code);
+        say("pair-msg", "ok", `Sent. The machine joins ${n.name} in a few seconds; a console of ${n.name} then admits it.`);
+      } catch (e) {
+        say("pair-msg", "err", e.message);
+        for (const x of box.querySelectorAll("button")) x.disabled = false;
+      }
+    };
+    box.append(b);
+  }
+}
+function showSave(code, name) {
+  const p = parseCode(code);
+  if (p.private) { say("msg", "err", PRIVATE_REFUSED); return; }
+  if (p.error) { say("msg", "err", p.error); return; }
+  $("save").hidden = false;
+  $("save-name").textContent = name || "network";
+  $("save-id").textContent = p.id;
+  $("save-yes").onclick = () => {
+    try { const n = keep(p.code, name); $("save").hidden = true; render(); say("msg", "ok", `${n.name} kept on this phone.`); }
+    catch (e) { say("msg", "err", e.message); }
+  };
+  $("save-no").onclick = () => { $("save").hidden = true; };
+}
+async function selftest() {
+  // the vectors of src/pair.rs (seed = 32 bytes of 0x01)
+  const k = await pairingKeys(new Uint8Array(32).fill(1));
+  const ok = hex(k.pub) === "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+    && k.z32 === "tkrq8zmwb8a3m9k15csu3q17qmfgqnp9dskbrg9uq1rydpyxp7qy"
+    && hex(k.aes) === "1eb0004489261f88d0c4b6f7b7f8c7a49ac7b4982c988ef45090f9903c96a72b"
+    && b32encode(new Uint8Array(32).fill(1), B32).toLowerCase() === "aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq";
+  say("msg", ok ? "ok" : "err", ok ? "selftest PASS" : "selftest FAIL");
+  return ok;
+}
+function route() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.has("net")) showSave(h.get("net"), h.get("name"));
+  else if (h.has("pair")) showPair(h.get("pair"));
+  else if (h.has("selftest")) selftest();
+  // the fragment carries a one-use key: do not leave it in the address bar or the history
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+}
+$("add").onclick = () => {
+  try { const n = keep($("code").value, $("name").value); $("code").value = ""; $("name").value = ""; render(); say("msg", "ok", `${n.name} kept on this phone.`); }
+  catch (e) { say("msg", "err", e.message); }
+};
+window.addEventListener("hashchange", route);
+render();
+route();
+</script>
+</body>
+</html>

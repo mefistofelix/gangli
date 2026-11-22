@@ -146,7 +146,7 @@ async fn publish_blob(signer: &SecretKey, blob: &[u8]) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_blob(id: &PublicKey) -> Result<Vec<u8>> {
+pub(crate) async fn resolve_blob(id: &PublicKey) -> Result<Vec<u8>> {
     let pk = pkarr::PublicKey::try_from(id.as_bytes()).ctx("directory key")?;
     let packet = tokio::time::timeout(Duration::from_secs(20), client()?.resolve(&pk, ResolvePolicy::NetworkOnly))
         .await

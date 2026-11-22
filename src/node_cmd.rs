@@ -28,6 +28,34 @@ pub fn join(code_str: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `gangli pair`: join a network from a phone (pair.rs). Shows a QR (stdout; stderr with `--json`), waits for
+/// the phone's answer, then joins like `gangli join`.
+pub fn pair(minutes: u64, json: bool) -> Result<()> {
+    admin()?;
+    let p = crate::pair::Pairing::new();
+    let url = p.url();
+    let show = format!(
+        "{}{url}\n\nScan it with your phone's camera: the gangli wallet opens; pick the network for this machine.\nWaiting up to {minutes} min (Ctrl+C to stop)…\n",
+        crate::qr::terminal(&url)
+    );
+    if json {
+        eprint!("{show}");
+    } else {
+        print!("{show}");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let code = rt.block_on(p.wait(std::time::Duration::from_secs(minutes * 60), None))?;
+    let name = state::add_join(&code)?;
+    if json {
+        print_json(json!({ "membership": name }));
+    } else if crate::paths::service_installed() {
+        println!("joined ({name}): the gangli service asks a console of the network to admit this machine");
+    } else {
+        println!("joined ({name}); start the node with `gangli node` (or install it as a service: `gangli install`)");
+    }
+    Ok(())
+}
+
 /// `gangli node [--code CODE]`: run the node now, in the foreground, as the current user (or root). The code
 /// (or the one embedded in the binary) is joined first if this machine is not in that network yet.
 pub fn run(code: Option<String>) -> Result<()> {
