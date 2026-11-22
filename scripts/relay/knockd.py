@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Single-packet knock for the relay VM's SSH (docs/RELAY.md). Nothing listens: the knock port is DROPped by the
 # firewall like every closed port, and this daemon reads packets from a packet socket (it sees them before the
-# firewall does). A valid knock opens TCP 22 for 60 s to the sender's address only (iptables `recent` list
-# "knock"); an SSH session that is already open stays open.
+# firewall does). A valid knock lets the sender's address (and only it) open new connections to any port for
+# 60 s (nftables set `inet host knock`, its elements expire by themselves); connections already open stay open.
 #
 # Knock: one UDP datagram of 56 bytes to the knock port:
 #   ts (u64 BE, unix seconds) | nonce (16 random bytes) | HMAC-SHA256(key, "gangli-knock-v1" | ts | nonce)
@@ -10,13 +10,13 @@
 # Anything else is ignored without a trace or an answer.
 #
 # usage: knockd.py <udp port> <key file: 64 hex chars, root-only>
-import hashlib, hmac, socket, struct, sys, time
+import hashlib, hmac, socket, struct, subprocess, sys, time
 
 PORT = int(sys.argv[1])
 KEY = bytes.fromhex(open(sys.argv[2]).read().split()[-1])
 LABEL = b"gangli-knock-v1"
 WINDOW = 30
-RECENT = "/proc/net/xt_recent/knock"
+OPEN_FOR = "60s"
 ETH_P_IP = 0x0800
 PACKET_OUTGOING = 4
 
@@ -56,12 +56,16 @@ def main():
         if not valid(pkt[ihl + 8 :]):
             continue
         src = socket.inet_ntoa(pkt[12:16])
-        try:
-            with open(RECENT, "w") as f:
-                f.write(f"+{src}\n")
-            print(f"knockd: ssh open for {src} (60 s)", flush=True)
-        except OSError as e:
-            print(f"knockd: cannot open ssh for {src}: {e}", flush=True)
+        # update: a second knock within the minute restarts the 60 s
+        r = subprocess.run(
+            ["/usr/sbin/nft", f"add element inet host knock {{ {src} timeout {OPEN_FOR} }}; "
+                              f"delete element inet host knock {{ {src} }}; "
+                              f"add element inet host knock {{ {src} timeout {OPEN_FOR} }}"],
+            capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"knockd: open for {src} ({OPEN_FOR})", flush=True)
+        else:
+            print(f"knockd: cannot open for {src}: {r.stderr.strip()}", flush=True)
 
 
 if __name__ == "__main__":

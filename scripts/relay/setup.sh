@@ -4,9 +4,11 @@
 #   ssh ubuntu@VM 'cat > /tmp/knockd.py' < scripts/relay/knockd.py
 #   awk '{print $3}' KNOCKFILE | ssh ubuntu@VM 'sudo install -m 600 /dev/stdin /etc/knockd.key'
 #   awk '{print "KNOCK_PORT=" $2}' KNOCKFILE | ssh ubuntu@VM 'sudo install -m 600 /dev/stdin /etc/knockd.env'
+#   (the cloud firewall lets everything in: on Oracle one ingress rule, all protocols from 0.0.0.0/0)
 #   ssh ubuntu@VM 'bash -s -- IP open' < scripts/relay/setup.sh      # SSH still reachable without a knock
-#   (open the cloud firewall: TCP 443, UDP 7842, TCP 22, UDP knock port; knock, check that ssh works, then)
-#   ssh ubuntu@VM 'bash -s -- IP knock' < scripts/relay/setup.sh     # SSH only after a knock
+#   knock.ps1 KNOCKFILE; ssh ubuntu@VM 'sudo fw-confirm'               # a NEW session got in: keep the rules
+#   ssh ubuntu@VM 'bash -s -- IP knock' < scripts/relay/setup.sh     # everything but the relay after a knock
+#   knock.ps1 KNOCKFILE; ssh ubuntu@VM 'sudo fw-confirm'
 #
 # KNOCKFILE is one line "host port key-hex" kept only on your computer (knock.ps1 / knock.py read it).
 # What it installs: iroh-relay (release matching gangli's iroh) as a service on TCP 443 + UDP 7842 at
@@ -138,8 +140,7 @@ EOF
 # ---- knock daemon (scripts/relay/knockd.py; key and port copied beforehand) ----
 [ -f /tmp/knockd.py ] && sudo install -m 0755 /tmp/knockd.py /usr/local/bin/knockd.py && rm -f /tmp/knockd.py
 [ -x /usr/local/bin/knockd.py ] && [ -f /etc/knockd.key ] && [ -f /etc/knockd.env ] || { echo "copy knockd.py, /etc/knockd.key and /etc/knockd.env first"; exit 2; }
-sudo modprobe xt_recent
-echo xt_recent | sudo tee /etc/modules-load.d/knock.conf > /dev/null
+sudo rm -f /etc/modules-load.d/knock.conf  # an earlier version used iptables' xt_recent
 sudo tee /etc/systemd/system/knockd.service > /dev/null <<'EOF'
 [Unit]
 Description=Single-packet knock for SSH (no listening port)
@@ -163,26 +164,93 @@ EOF
 # ---- nothing else listening ----
 sudo systemctl disable --now rpcbind.socket rpcbind.service > /dev/null 2>&1 || true
 
-# ---- firewall: answer nothing but the relay; SSH after a knock (MODE=knock) ----
-sudo cp -n /etc/iptables/rules.v4 /etc/iptables/rules.v4.oracle-original 2>/dev/null || true
-sudo sh -c 'iptables-save > /root/rules.v4.before'
+# ---- firewall (nftables; the cloud firewall lets everything in, this one decides): answer nothing but the
+# relay; SSH only after a knock (MODE=knock) ----
+SSH_OPEN=""
+[ "$MODE" = knock ] || SSH_OPEN="tcp dport 22 accept  # MODE=open: SSH without a knock"
+sudo tee /etc/nftables.conf.new > /dev/null <<EOF
+#!/usr/sbin/nft -f
+# gangli relay VM (scripts/relay/setup.sh, docs/RELAY.md). Mode: $MODE.
+flush ruleset
+
+table inet host {
+    # addresses that knocked (scripts/relay/knockd.py adds them with a 60 s timeout)
+    set knock {
+        type ipv4_addr
+        flags timeout
+    }
+
+    # Nothing new gets in but these two ports (TCP and UDP only: no ping, no ICMP, no IPv6), and everything
+    # from an address that knocked in the last 60 s. "related" lets in only the ICMP errors about
+    # connections already open (e.g. "fragmentation needed"), which path MTU discovery needs.
+    chain input {
+        type filter hook input priority filter; policy drop;
+        ct state established,related accept
+        ct state invalid drop
+        iif lo accept
+        ip saddr @knock accept                    # knocked: every port, every protocol, for 60 s
+        tcp dport 443 accept                      # iroh relay (HTTPS / WebSocket, TLS-ALPN-01)
+        udp dport 7842 accept                     # iroh QUIC address discovery
+        $SSH_OPEN
+        udp sport 67 udp dport 68 accept          # DHCP answers from Oracle
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 169.254.0.0/16 jump instance_services
+    }
+
+    # Oracle's rules for its instance services (iSCSI boot volume, metadata, DNS, NTP), kept as shipped in the
+    # image: see "Oracle-Provided Images" in the OCI docs before changing them
+    chain instance_services {
+        ip daddr 169.254.0.2 tcp dport 3260 meta skuid 0 accept
+        ip daddr { 169.254.2.0/24, 169.254.4.0/24, 169.254.5.0/24 } tcp dport 3260 meta skuid 0 accept
+        ip daddr 169.254.0.2 tcp dport 80 accept
+        ip daddr 169.254.169.254 udp dport 53 accept
+        ip daddr 169.254.169.254 tcp dport 53 accept
+        ip daddr 169.254.0.3 tcp dport 80 meta skuid 0 accept
+        ip daddr 169.254.0.4 tcp dport 80 accept
+        ip daddr 169.254.169.254 tcp dport 80 accept
+        ip daddr 169.254.169.254 udp dport { 67, 69, 123 } accept
+        meta l4proto tcp reject with tcp reset
+        meta l4proto udp reject with icmpx type port-unreachable
+    }
+}
+EOF
+sudo nft -c -f /etc/nftables.conf.new
+# confirming: the new rules for good (nftables.service), iptables-persistent gone
+sudo tee /usr/local/sbin/fw-confirm > /dev/null <<'EOF'
+#!/bin/sh
+# run from a NEW ssh session once it works: keeps the firewall just applied by setup.sh
+set -e
+systemctl stop fw-rollback.timer 2>/dev/null || true
+mv /etc/nftables.conf.new /etc/nftables.conf
+systemctl enable nftables > /dev/null 2>&1
+if dpkg -s iptables-persistent > /dev/null 2>&1; then
+  systemctl disable --now netfilter-persistent > /dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq iptables-persistent netfilter-persistent > /dev/null
+  rm -rf /etc/iptables
+fi
+echo "firewall kept: $(sed -n 2p /etc/nftables.conf)"
+EOF
+sudo chmod 0755 /usr/local/sbin/fw-confirm
+# safety net: unless confirmed, everything is let in again in 5 minutes (only sshd and the relay listen)
 sudo systemctl stop fw-rollback.timer fw-rollback.service 2>/dev/null || true
-sudo systemd-run --quiet --unit=fw-rollback --on-active=5min /usr/sbin/iptables-restore /root/rules.v4.before
-r() { sudo iptables -A INPUT "$@"; }
-sudo iptables -F INPUT
-r -m state --state RELATED,ESTABLISHED -j ACCEPT
-r -i lo -j ACCEPT
-r -p tcp --dport 22 -m state --state NEW -m recent --name knock --rcheck --seconds 60 -j ACCEPT
-[ "$MODE" = knock ] || r -p tcp --dport 22 -m state --state NEW -j ACCEPT
-r -p tcp --dport 443 -j ACCEPT
-r -p udp --dport 7842 -j ACCEPT
-r -j DROP
+sudo systemd-run --quiet --unit=fw-rollback --on-active=5min /usr/sbin/nft flush ruleset
+sudo nft -f /etc/nftables.conf.new
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now oci-keepalive knockd > /dev/null 2>&1
+sudo systemctl enable oci-keepalive knockd > /dev/null 2>&1
+sudo systemctl restart oci-keepalive knockd
 # the relay asks Let's Encrypt for its certificate by itself (and retries until TCP 443 is reachable)
 sudo systemctl enable iroh-relay > /dev/null 2>&1
-sudo systemctl restart iroh-relay
+if ! systemctl is-active --quiet iroh-relay || [ /etc/iroh-relay.toml -nt /run/iroh-relay.applied ]; then
+  sudo systemctl restart iroh-relay && sudo touch /run/iroh-relay.applied
+fi
 
-echo "firewall ($MODE): rollback in 5 minutes unless you run, from a NEW ssh session:"
-echo "  sudo systemctl stop fw-rollback.timer && sudo sh -c 'iptables-save > /etc/iptables/rules.v4'"
+echo "firewall ($MODE) applied: everything is let in again in 5 minutes unless, from a NEW ssh session"
+echo "(after a knock, in knock mode), you run: sudo fw-confirm"

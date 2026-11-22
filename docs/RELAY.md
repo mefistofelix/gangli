@@ -16,21 +16,29 @@ address, the SSH key and the knock file are the owner's, never in this repositor
 - **Name and certificate [decided 2026-11-22]**: `https://<ip-with-dashes>.sslip.io/` (sslip.io answers
   `92-5-87-7.sslip.io` with `92.5.87.7`: no domain to own or keep, the name is only the IP). The relay gets
   and renews its own Let's Encrypt certificate (`cert_mode = "LetsEncrypt"`, TLS-ALPN-01 on 443, like
-  Caddy): no certbot, no port 80. Let's Encrypt has no mail service any more; iroh-relay still wants a
+  Caddy; 90 days, cached in `/var/lib/iroh-relay`): no certbot, no port 80 (that is HTTP-01, another
+  challenge). Mind the order: TCP 443 must be reachable *before* the relay first starts, or it burns Let's
+  Encrypt's 5 failed authorizations an hour and waits an hour. Let's Encrypt has no mail service any more; iroh-relay still wants a
   contact, so it gets a placeholder. Why not a certificate for the bare IP: iroh-relay's ACME client
   (`tokio-rustls-acme` 0.10) asks only for DNS names, and Let's Encrypt gives IP certificates only with its
   6-day profile, which needs an outside client (certbot was tried and dropped: one more moving part).
   Known risk: sslip.io is not on the Public Suffix List, so a *first* certificate shares Let's Encrypt's
   50-a-week limit with every sslip.io user; renewals of the same name are exempt from it.
-- **Firewall that answers nothing**: the VM's iptables accept only established traffic, TCP 443 and UDP 7842,
-  and DROP the rest (no ICMP host-prohibited, no ping): a scan sees the relay and nothing else. `rpcbind` is
-  off. The cloud firewall (VCN security list) must let in TCP 443, UDP 7842, TCP 22 and the knock port; the
-  VM's own firewall is what hides them.
-- **SSH only after a knock** ([`knockd.py`](../scripts/relay/knockd.py)): one UDP packet to a secret port,
-  `timestamp | nonce | HMAC-SHA256(key, ...)`, valid for 30 s and never twice. Nothing listens on that port:
-  the firewall drops it like any other and the daemon reads it from a packet socket, so it cannot be told
-  apart from a closed port, and a wrong or replayed packet gets no answer at all. A valid knock opens TCP 22
-  for 60 s to the sender's address only (iptables `recent` list); open sessions stay open. Clients:
+- **One firewall, on the VM, that answers nothing [decided 2026-11-22]**: the cloud firewall (Oracle VCN
+  security list) lets *everything* in (one rule, all protocols from `0.0.0.0/0`), so it never needs the
+  Oracle console again; the VM's **nftables** (`/etc/nftables.conf`, table `inet host`, policy drop) decides.
+  New traffic gets in only on TCP 443 and UDP 7842 (TCP and UDP only: no ping, no other ICMP, no IPv6),
+  plus Oracle's DHCP answers; the only ICMP let in are errors about connections already open ("related":
+  path MTU discovery needs them). A scan sees the relay and nothing else. Oracle's output rules for its
+  instance services (metadata, iSCSI boot volume) are kept, translated to nftables; iptables-persistent is
+  removed, `rpcbind` is off. UDP 443 is not needed: the relay protocol is WebSocket over TCP 443, its QUIC
+  (address discovery only) is on 7842, and the endpoints' own QUIC goes peer to peer.
+- **Everything else only after a knock** ([`knockd.py`](../scripts/relay/knockd.py)): one UDP packet to a
+  secret port, `timestamp | nonce | HMAC-SHA256(key, ...)`, valid for 30 s and never twice. Nothing listens
+  on that port: the firewall drops it like any other and the daemon reads it from a packet socket, so it
+  cannot be told apart from a closed port, and a wrong or replayed packet gets no answer at all. A valid
+  knock lets the sender's address, and only it, open new connections to every port for 60 s (nftables set
+  `knock`, elements with a timeout); open connections stay open. Clients:
   [`knock.ps1`](../scripts/relay/knock.ps1) (Windows, nothing to install) and
   [`knock.py`](../scripts/relay/knock.py); the knock file (`host port key-hex`) stays on the owner's
   computer, owner-only. Then ssh / PuTTY / WinSCP within 60 s, with the Pageant key (password login is off).
@@ -39,9 +47,15 @@ address, the SSH key and the knock file are the owner's, never in this repositor
   ```
   Match host <ip> exec "powershell -NoProfile -ExecutionPolicy Bypass -File C:/path/to/knock.ps1 C:/Users/me/.ssh/relay.knock"
   ```
-- **Not locking ourselves out**: `setup.sh` arms a 5-minute rollback (`fw-rollback` timer, restores the
-  previous rules) before every firewall change; it is cancelled only after a *new* SSH session (with a knock)
-  works. Last resort: the Oracle console's serial console or Run Command, independent of the network.
+- **Not locking ourselves out**: `setup.sh` applies new rules from `/etc/nftables.conf.new` and arms a
+  5-minute rollback first (`fw-rollback` timer: `nft flush ruleset`, everything let in, only sshd and the
+  relay listen); `sudo fw-confirm`, run from a *new* SSH session that got in (after a knock), cancels it and
+  makes the rules permanent. Tested 2026-11-22: no knock, SSH times out and ping is silent; knock, SSH gets in;
+  a reboot brings back firewall, knock, relay and keep-alive by themselves. Last resort: the Oracle console's
+  serial console or Run Command, independent of the network.
+- **Tested with gangli** 2026-11-22: a console and a node with `relays = ["https://<ip-with-dashes>.sslip.io"]` and
+  `relays_n0_fallback = false` found each other in 5 s; the relay counted their connections and QUIC
+  address discoveries (`curl 127.0.0.1:9090/metrics` on the VM).
 - **Keep-alive** (`oci-keepalive`): Oracle reclaims an Always Free instance when, over 7 days, **all** of CPU
   (95th percentile), network and memory (A1 shapes only) stay below 20%
   ([Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm)). A relay
