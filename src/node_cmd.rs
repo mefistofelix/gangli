@@ -15,27 +15,42 @@ fn print_json(v: serde_json::Value) {
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
 }
 
-pub fn join(code_str: &str, json: bool) -> Result<()> {
-    admin()?;
-    let name = state::add_join(code_str)?;
+/// Join every code (all checked first: nothing is joined if one is bad), then say what happens next.
+fn join_all(codes: &[String], json: bool) -> Result<()> {
+    for c in codes {
+        if let Ok(crate::code::Code::Private { .. }) = crate::code::decode(c) {
+            bail!("this is a private network code: it belongs in a console (`gangli network add`), never on a managed machine");
+        }
+        crate::code::decode(c)?;
+    }
+    let names: Vec<String> = codes.iter().map(|c| state::add_join(c)).collect::<Result<_>>()?;
+    let list = names.join(", ");
     if json {
-        print_json(json!({ "membership": name }));
+        print_json(json!({ "memberships": names }));
     } else if crate::paths::service_installed() {
-        println!("joined ({name}): the gangli service asks a console of the network to admit this machine");
+        println!("joined ({list}): the gangli service asks a console of each network to admit this machine");
     } else {
-        println!("joined ({name}); start the node with `gangli node` (or install it as a service: `gangli install`)");
+        println!("joined ({list}); start the node with `gangli node` (or install it as a service: `gangli install`)");
     }
     Ok(())
 }
 
-/// `gangli pair`: join a network from a phone (pair.rs). Shows a QR (stdout; stderr with `--json`), waits for
-/// the phone's answer, then joins like `gangli join`.
-pub fn pair(minutes: u64, json: bool) -> Result<()> {
+pub fn join(codes: &[String], json: bool) -> Result<()> {
+    if codes.is_empty() {
+        bail!("give the public code of a network: `gangli join <public code>`");
+    }
+    admin()?;
+    join_all(codes, json)
+}
+
+/// `gangli pair`: join networks from a phone (pair.rs). Shows a QR (stdout; stderr with `--json`), waits for
+/// the phone's answer, asks to confirm (in a terminal, unless `--yes`), then joins like `gangli join`.
+pub fn pair(minutes: u64, yes: bool, json: bool) -> Result<()> {
     admin()?;
     let p = crate::pair::Pairing::new();
     let url = p.url();
     let show = format!(
-        "{}{url}\n\nScan it with your phone's camera: the gangli wallet opens; pick the network for this machine.\nWaiting up to {minutes} min (Ctrl+C to stop)…\n",
+        "{}{url}\n\nScan it with your phone's camera: the gangli wallet opens; tick the networks for this machine.\nWaiting up to {minutes} min (Ctrl+C to stop)…\n",
         crate::qr::terminal(&url)
     );
     if json {
@@ -44,16 +59,22 @@ pub fn pair(minutes: u64, json: bool) -> Result<()> {
         print!("{show}");
     }
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let code = rt.block_on(p.wait(std::time::Duration::from_secs(minutes * 60), None))?;
-    let name = state::add_join(&code)?;
-    if json {
-        print_json(json!({ "membership": name }));
-    } else if crate::paths::service_installed() {
-        println!("joined ({name}): the gangli service asks a console of the network to admit this machine");
-    } else {
-        println!("joined ({name}); start the node with `gangli node` (or install it as a service: `gangli install`)");
+    let offers = rt.block_on(p.wait(std::time::Duration::from_secs(minutes * 60), None))?;
+    let labels: Vec<String> = offers.iter().map(|o| o.label()).collect();
+    use std::io::IsTerminal;
+    if !yes && !json && std::io::stdin().is_terminal() {
+        print!("\nThe phone sent: {}. Join? [Y/n] ", labels.join(", "));
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
+            println!("not joined");
+            return Ok(());
+        }
     }
-    Ok(())
+    let codes: Vec<String> = offers.into_iter().map(|o| o.code).collect();
+    join_all(&codes, json)
 }
 
 /// `gangli node [--code CODE]`: run the node now, in the foreground, as the current user (or root). The code

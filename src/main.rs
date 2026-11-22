@@ -92,13 +92,19 @@ enum Command {
         #[arg(long)]
         service: bool,
     },
-    /// node: join a network with its public code.
-    Join { code: String },
-    /// node: join a network from your phone: shows a QR; scan it with the phone (gangli wallet), pick the network.
+    /// node: join networks with their public codes.
+    Join {
+        #[arg(required = true)]
+        codes: Vec<String>,
+    },
+    /// node: join networks from your phone: shows a QR; scan it with the phone (gangli wallet), tick the networks.
     Pair {
         /// Minutes to wait for the phone.
         #[arg(long, default_value_t = 10)]
         minutes: u64,
+        /// Join what the phone sends without asking.
+        #[arg(long)]
+        yes: bool,
     },
     /// node: leave a network.
     Leave { network: String },
@@ -427,8 +433,8 @@ fn main() {
                 agent_run().map_err(io_err)
             }
         }
-        Some(Command::Join { code }) => node_cmd::join(&code, json),
-        Some(Command::Pair { minutes }) => node_cmd::pair(minutes, json),
+        Some(Command::Join { codes }) => node_cmd::join(&codes, json),
+        Some(Command::Pair { minutes, yes }) => node_cmd::pair(minutes, yes, json),
         Some(Command::Leave { network }) => node_cmd::leave(&network, json),
         Some(Command::Status) => node_cmd::status(json),
         Some(Command::Network(NetworkCmd::Create { name })) => console_cmd::network_create(&name, json),

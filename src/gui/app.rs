@@ -39,8 +39,10 @@ enum Page {
 enum Modal {
     Codes { network: String, public: String, private: String, show_private: bool },
     Token { name: String, token: String, url: String, instructions: String },
-    /// Joining from a phone: the QR shown, the answer when it comes (the public code), and a stop flag.
-    Pair { url: String, answer: Arc<Mutex<Option<Result<String, String>>>>, cancel: Arc<AtomicBool> },
+    /// Joining from a phone: the QR shown, the answer when it comes (the networks), and a stop flag.
+    Pair { url: String, answer: Arc<Mutex<Option<Result<Vec<crate::pair::Offer>, String>>>>, cancel: Arc<AtomicBool> },
+    /// The phone sent these networks: the person at this computer confirms (and may untick some).
+    PairConfirm { offers: Vec<(crate::pair::Offer, bool)> },
     Confirm { text: String, op: IpcOp, done: String },
     /// A network's extra relays, one address per line.
     Relays { network: String, text: String },
@@ -95,6 +97,16 @@ struct LocalNode {
     /// Output of `gangli install` / `uninstall` run from here (None while it runs).
     job: Option<Arc<Mutex<Option<String>>>>,
     job_output: String,
+    /// When the running job ends: start the node in this window (the service was just uninstalled for it).
+    then_window: bool,
+}
+
+/// How this computer runs its node.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum NodeMode {
+    Off,
+    Window,
+    Service,
 }
 
 pub struct App {
@@ -242,6 +254,10 @@ impl App {
             geo_saved: super::saved_geometry(),
         };
         app.read_node();
+        // Without the service, the node runs in this window while it is open (unless turned off).
+        if !app.node.installed && !app.node.networks.is_empty() && crate::state::load().is_ok_and(|s| s.node.window_node) {
+            app.start_window_node();
+        }
         // A binary made for a relative (with an embedded code), or a computer with no network yet: start on
         // "This computer".
         let consoles_networks = crate::console::load_state().map(|s| s.networks.len()).unwrap_or(0);
@@ -374,6 +390,9 @@ impl App {
             self.node.job_output = out;
             self.node.job = None;
             self.read_node();
+            if std::mem::take(&mut self.node.then_window) && !self.node.installed {
+                self.set_window_node(true);
+            }
         }
         if let Some(t) = &self.node.thread {
             if t.is_finished() {
@@ -1104,91 +1123,72 @@ impl App {
         ui.add_space(8.0);
         ui.label(RichText::new("Managed from a console (node)").strong());
         let busy = self.node.job.is_some();
-        if self.node.installed {
-            ui.label("gangli is installed as a service on this computer: it starts with the computer and its consoles have full access.");
-            let bin = self.node.installed_at.clone();
-            if let Some(b) = &bin {
-                ui.label(RichText::new(b.display().to_string()).monospace().weak());
-            }
-            if ui.add_enabled(!busy, egui::Button::new("Uninstall the service…")).clicked() {
-                self.start_job(bin, vec!["uninstall".into()]);
-            }
-        } else {
-            for (net, admitted, name, err) in &self.node.networks {
-                ui.horizontal(|ui| {
-                    dot(ui, if *admitted { GREEN } else { AMBER });
-                    let state = if *admitted {
-                        format!("admitted as {}", name.clone().unwrap_or_default())
-                    } else {
-                        "waiting for a console of the network".to_string()
-                    };
-                    ui.label(RichText::new(net).strong());
-                    ui.label(state);
-                    if let (false, Some(e)) = (*admitted, err) {
-                        ui.label(RichText::new(e).color(RED));
-                    }
-                });
-            }
-            let running = self.node.stop.is_some();
+        // Networks of this computer.
+        if self.node.installed && self.node.networks.is_empty() {
+            ui.label(RichText::new("The service keeps its networks in its own folder (readable by the system only).").weak());
+        }
+        for (net, admitted, name, err) in &self.node.networks {
+            ui.horizontal(|ui| {
+                dot(ui, if *admitted { GREEN } else { AMBER });
+                let state = if *admitted {
+                    format!("admitted as {}", name.clone().unwrap_or_default())
+                } else {
+                    "waiting for a console of the network to admit it".to_string()
+                };
+                ui.label(RichText::new(net).strong());
+                ui.label(state);
+                if let (false, Some(e)) = (*admitted, err) {
+                    ui.label(RichText::new(e).color(RED));
+                }
+            });
+        }
+        ui.horizontal(|ui| {
             if ui
-                .button(RichText::new("Pair with your phone…").strong())
-                .on_hover_text("Shows a QR: scan it with your phone (gangli wallet) and pick the network — no code to type")
+                .add_enabled(!busy, egui::Button::new(RichText::new("Pair with your phone…").strong()))
+                .on_hover_text("Shows a QR: scan it with your phone (gangli wallet) and tick the networks — no code to type")
                 .clicked()
             {
                 self.start_pairing();
             }
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("or the public code (the longer one)").desired_width(320.0));
-                if ui.add_enabled(!self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
-                    match crate::state::add_join(self.f.node_code.trim()) {
-                        Ok(name) => self.toast(format!("joined {name}"), false),
-                        Err(e) => self.toast(format!("{e:#}"), true),
-                    }
-                    self.read_node();
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if running {
-                    dot(ui, GREEN);
-                    ui.label(RichText::new("The node runs in this window").color(GREEN));
-                    if ui.button("Stop").clicked() {
-                        if let Some(s) = self.node.stop.take() {
-                            s.store(true, Ordering::SeqCst);
-                        }
-                    }
-                } else if ui
-                    .add_enabled(!self.node.networks.is_empty(), egui::Button::new("Run the node now"))
-                    .on_hover_text("Until gangli is closed, as this user")
-                    .clicked()
-                {
-                    let stop = Arc::new(AtomicBool::new(false));
-                    let s2 = stop.clone();
-                    self.node.thread = Some(std::thread::spawn(move || crate::node::run_blocking(s2)));
-                    self.node.stop = Some(stop);
-                }
+            ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("or a public code (the longer one)").desired_width(300.0));
+            if ui.add_enabled(!busy && !self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
                 let code = self.f.node_code.trim().to_string();
-                if ui
-                    .add_enabled(!busy && (!code.is_empty() || !self.node.networks.is_empty()), egui::Button::new("Install as a service…"))
-                    .on_hover_text("Starts with the computer, full access; asks for the administrator once")
-                    .clicked()
-                {
-                    if let Some(s) = self.node.stop.take() {
-                        s.store(true, Ordering::SeqCst);
-                    }
-                    let mut args = vec!["install".to_string()];
-                    if !code.is_empty() {
-                        args.push("--code".into());
-                        args.push(code);
-                    }
-                    self.start_job(None, args);
-                }
-            });
+                self.join_codes(vec![code]);
+                self.f.node_code.clear();
+            }
+        });
+
+        // How the node runs: one choice, gangli does the rest (stop, install, uninstall, start).
+        ui.add_space(8.0);
+        let mode = self.node_mode();
+        ui.label(RichText::new("Run the node").strong());
+        let mut want = mode;
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.radio_value(&mut want, NodeMode::Off, "Off").on_hover_text("No console can reach this computer");
+            ui.radio_value(&mut want, NodeMode::Window, "While gangli is open")
+                .on_hover_text("In this window, as this user: consoles reach this computer while gangli runs (also in the tray)");
+            ui.radio_value(&mut want, NodeMode::Service, "Always, as a service")
+                .on_hover_text("Starts with the computer, even with nobody logged in; full access. Asks for the administrator once.");
+        });
+        if want != mode {
+            self.set_node_mode(want);
         }
-        if busy {
-            ui.label(RichText::new("Working… (confirm the system's request)").weak());
-        }
+        let (color, line) = match (mode, busy) {
+            (_, true) => (AMBER, "Working… confirm the system's request if one appears".to_string()),
+            (NodeMode::Service, _) => (
+                GREEN,
+                format!("Runs as a service{}", self.node.installed_at.as_ref().map(|b| format!(" ({})", b.display())).unwrap_or_default()),
+            ),
+            (NodeMode::Window, _) => (GREEN, "Runs in this window".to_string()),
+            (NodeMode::Off, _) if self.node.networks.is_empty() => (GREY, "Off: join a network first (above)".to_string()),
+            (NodeMode::Off, _) => (GREY, "Off: no console can reach this computer".to_string()),
+        };
+        ui.horizontal(|ui| {
+            dot(ui, color);
+            ui.label(RichText::new(line).color(color));
+        });
         if !self.node.job_output.is_empty() {
-            ui.add(egui::Label::new(RichText::new(self.node.job_output.trim()).monospace()).wrap());
+            ui.add(egui::Label::new(RichText::new(self.node.job_output.trim()).monospace().weak()).wrap());
         }
         ui.add_space(14.0);
         ui.label(RichText::new("This window").strong());
@@ -1234,25 +1234,125 @@ impl App {
         self.modal = Some(Modal::Pair { url, answer, cancel });
     }
 
-    /// The phone answered: join that network (through an elevated `gangli join` when the service owns the state).
+    /// The phone answered: ask the person at this computer to confirm the networks it sent.
     fn finish_pairing(&mut self) {
         let Some(Modal::Pair { answer, cancel, .. }) = &self.modal else { return };
         let Some(r) = answer.lock().unwrap().take() else { return };
         let cancelled = cancel.load(Ordering::SeqCst);
         self.modal = None;
         match r {
-            Ok(code) if self.node.installed => {
-                self.start_job(None, vec!["join".into(), code]);
-                self.toast("Network received: confirm the system's request to save it", false);
-            }
-            Ok(code) => match crate::state::add_join(&code) {
-                Ok(name) => self.toast(format!("Joined {name}: a console of that network admits this computer"), false),
-                Err(e) => self.toast(format!("{e:#}"), true),
-            },
+            Ok(offers) => self.modal = Some(Modal::PairConfirm { offers: offers.into_iter().map(|o| (o, true)).collect() }),
             Err(_) if cancelled => {}
             Err(e) => self.toast(e, true),
         }
+    }
+
+    fn node_mode(&self) -> NodeMode {
+        if self.node.installed {
+            NodeMode::Service
+        } else if self.node.stop.is_some() {
+            NodeMode::Window
+        } else {
+            NodeMode::Off
+        }
+    }
+
+    /// Go to another mode, doing what it takes: stop the window's node, install or uninstall the service
+    /// (one system prompt), start the window's node.
+    fn set_node_mode(&mut self, want: NodeMode) {
+        match (self.node_mode(), want) {
+            (NodeMode::Service, NodeMode::Window) => {
+                self.node.then_window = true;
+                self.start_job(self.node.installed_at.clone(), vec!["uninstall".into()]);
+            }
+            (NodeMode::Service, NodeMode::Off) => {
+                let _ = crate::state::update(|st| {
+                    st.node.window_node = false;
+                    Ok(())
+                });
+                self.start_job(self.node.installed_at.clone(), vec!["uninstall".into()]);
+            }
+            (_, NodeMode::Service) if self.node.networks.is_empty() => {
+                self.toast("Join a network first: pair with your phone, or paste a public code", true);
+            }
+            (_, NodeMode::Service) => {
+                self.stop_window_node();
+                self.start_job(None, vec!["install".into()]);
+            }
+            (_, NodeMode::Window) => self.set_window_node(true),
+            (_, NodeMode::Off) => self.set_window_node(false),
+        }
+    }
+
+    /// Remember whether the window runs the node, and start or stop it now.
+    fn set_window_node(&mut self, on: bool) {
+        let _ = crate::state::update(|st| {
+            st.node.window_node = on;
+            Ok(())
+        });
+        if on {
+            if self.node.networks.is_empty() {
+                self.toast("Join a network first: pair with your phone, or paste a public code", true);
+            } else {
+                self.start_window_node();
+            }
+        } else {
+            self.stop_window_node();
+        }
+    }
+
+    fn start_window_node(&mut self) {
+        if self.node.stop.is_some() || self.node.installed {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = stop.clone();
+        self.node.thread = Some(std::thread::spawn(move || crate::node::run_blocking(s2)));
+        self.node.stop = Some(stop);
+    }
+
+    fn stop_window_node(&mut self) {
+        if let Some(s) = self.node.stop.take() {
+            s.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Join these networks and make sure the node runs: the service gets them (one system prompt), else the
+    /// node starts in this window.
+    fn join_codes(&mut self, codes: Vec<String>) {
+        if codes.is_empty() {
+            return;
+        }
+        if self.node.installed {
+            let mut args = vec!["join".to_string()];
+            args.extend(codes);
+            self.start_job(self.node.installed_at.clone(), args);
+            self.toast("Confirm the system's request: the service joins the networks", false);
+            return;
+        }
+        let mut joined = vec![];
+        for c in &codes {
+            match crate::state::add_join(c) {
+                Ok(name) => joined.push(name),
+                Err(e) => self.toast(format!("{e:#}"), true),
+            }
+        }
         self.read_node();
+        if joined.is_empty() {
+            return;
+        }
+        // A running node picks new memberships up by itself; otherwise start it.
+        let off_by_choice = crate::state::load().is_ok_and(|s| !s.node.window_node);
+        if self.node.stop.is_none() {
+            if off_by_choice {
+                let _ = crate::state::update(|st| {
+                    st.node.window_node = true;
+                    Ok(())
+                });
+            }
+            self.start_window_node();
+        }
+        self.toast(format!("Joined {}: the node runs; a console of each network admits this computer", joined.join(", ")), false);
     }
 
     /// Run gangli (this binary, or the installed one) with `args`, keeping its output for the page.
@@ -1431,15 +1531,25 @@ impl App {
                     ui.add_space(6.0);
                     ui.add(egui::TextEdit::multiline(text).hint_text("https://relay.example.org").desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 }
+                Modal::PairConfirm { offers } => {
+                    ui.heading("Your phone sent networks");
+                    ui.label("Join this computer to:");
+                    ui.add_space(4.0);
+                    for (o, on) in offers.iter_mut() {
+                        ui.checkbox(on, RichText::new(o.label()).strong());
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("The node then runs and a console of each network admits this computer. Only join networks you expect.").weak());
+                }
                 Modal::Pair { url, .. } => {
-                    ui.heading("Join a network from your phone");
+                    ui.heading("Join networks from your phone");
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         qr_image(ui, url, 220.0);
                         ui.vertical(|ui| {
                             ui.label("1. Scan this with your phone's camera: the gangli wallet opens.");
-                            ui.label("2. Pick the network for this computer.");
-                            ui.label("3. This computer joins by itself; a console of that network admits it.");
+                            ui.label("2. Tick the networks for this computer and tap Add.");
+                            ui.label("3. Confirm here; a console of each network admits this computer.");
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.spinner();
@@ -1455,6 +1565,15 @@ impl App {
                 if let Modal::Confirm { op, done, .. } = &m {
                     if ui.button(RichText::new("Yes").color(RED)).clicked() {
                         self.call(Tag::Done(done.clone()), op.clone());
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::PairConfirm { offers } = &m {
+                    let codes: Vec<String> = offers.iter().filter(|(_, on)| *on).map(|(o, _)| o.code.clone()).collect();
+                    if ui.add_enabled(!codes.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
+                        self.join_codes(codes);
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {

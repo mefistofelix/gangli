@@ -373,12 +373,21 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     wallet's address and `#net=<public code>&name=…`: scanned with the phone's camera, the wallet opens and
     keeps that network. Private codes are never put in a QR, and the wallet refuses them.
   - On the machine: *This computer → Pair with your phone* (or `gangli pair`) shows a QR with the wallet's
-    address and `#pair=<random 32-byte seed>`. Scanned with the phone's camera, the wallet opens; you pick a
-    network. The wallet encrypts that network's public code with AES-256-GCM under
-    `SHA-256("gangli-pair-v1" | seed)` and publishes `nonce | ciphertext` on the **pkarr relays** (TXT `_gangli`,
-    the directory's format), signed by the ed25519 key whose seed is the seed. The machine polls that key
-    **only while its QR is on screen** (every 3 s, at most 10 minutes), decrypts, checks that it is a public
-    code, and joins; a console of the network then admits it as for any join.
+    address and `#pair=<random 32-byte seed>&v=2&name=<machine>`. Scanned with the phone's camera, the wallet
+    opens on "Add <machine> to networks": you tick one or more networks and tap *Add*. The wallet encrypts them
+    with AES-256-GCM under `SHA-256("gangli-pair-v1" | seed)` and publishes `nonce | ciphertext` on the **pkarr
+    relays** (TXT `_gangli` in parts `a…`, `b…`, the directory's format), signed by the ed25519 key whose seed
+    is the seed. Plaintext v2: `0x02`, then per network its 49 code bytes, a name length and the phone's name
+    for it (≤ 24 bytes); at most 6 networks (a pkarr packet holds 1000 bytes: 6 with long names make 885). A QR
+    without `v` (build-11) gets v1, one public code as text. The machine polls that key **only while its QR is
+    on screen** (every 3 s, at most 10 minutes), decrypts, checks that every code is a public one, and **asks
+    the person at the machine to confirm** (GUI dialog with the networks ticked, or `[Y/n]` in a terminal;
+    `gangli pair --yes` for scripts). Confirmed, it joins and its node runs (section 12); a console of each
+    network admits it as for any join.
+  - Wallet flow **[decided 2026-11-22]**: scanning a network QR saves it at once (a public code: no question,
+    *Undo* and *remove* are there); the phone never asks to confirm a machine, the machine does. A machine
+    scanned while the phone has no network yet is remembered for 10 minutes: saving a network then offers to
+    add that machine without scanning it again.
   - Why it is safe: the relays see a random key and ciphertext; only who saw the machine's screen holds the
     seed, so nobody else can send it a network; only a public code ever travels (the power to *ask* to join).
     Why this way: a browser cannot speak iroh, and anything it can speak to a machine directly (HTTP,
@@ -419,9 +428,13 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
   - *API*: on / off, tokens (made here, shown once; revoke);
   - *This computer* (node): memberships and admission, **pair with your phone** (section 10), join with a
-    public code (prefilled when embedded),
-    run the node inside the window, install as a service (the same `gangli install`, from where it is), the
-    installed service and uninstall; the files gangli keeps. A binary with an embedded code and no console
+    public code (prefilled when embedded), and **one choice for how the node runs [decided 2026-11-22]**:
+    *Off*, *While gangli is open* (in the window, as this user) or *Always, as a service* (`gangli install`,
+    from where it is). Changing it does the rest: stop the window's node, install or uninstall the service
+    (one system prompt), start the window's node. Without the service, the window runs the node by itself
+    whenever it has a network (`[node] window_node`, on unless *Off* was chosen): joining a network (phone or
+    code) starts it, nothing to press. With the service, joining runs the installed binary's `gangli join`
+    (one prompt for all the networks). The files gangli keeps. A binary with an embedded code and no console
     network opens on this page.
 - **Integrated terminal** (`gui/term.rs`, when the console lives in the window): tabs of shells or persistent
   terminals on machines, over the same resumable stream as the gateway (survives drops); alacritty_terminal

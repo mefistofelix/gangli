@@ -41,6 +41,10 @@ pub struct NodeConf {
     /// With own relays, keep the n0 ones as a fallback.
     #[serde(default = "yes")]
     pub relays_n0_fallback: bool,
+    /// Without the service: the gangli window runs the node while it is open (on by default; *Off* in
+    /// This computer turns it off).
+    #[serde(default = "yes")]
+    pub window_node: bool,
 }
 
 fn yes() -> bool {
@@ -49,7 +53,14 @@ fn yes() -> bool {
 
 impl Default for NodeConf {
     fn default() -> Self {
-        NodeConf { key: String::new(), installed: false, service_user: String::new(), relays: vec![], relays_n0_fallback: true }
+        NodeConf {
+            key: String::new(),
+            installed: false,
+            service_user: String::new(),
+            relays: vec![],
+            relays_n0_fallback: true,
+            window_node: true,
+        }
     }
 }
 

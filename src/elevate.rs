@@ -3,8 +3,9 @@
 //! commands; skipped in the `GANGLI_STATE_DIR` development mode). When the process is not elevated it
 //! re-launches itself elevated with the same arguments and exits with the child's status.
 //!
-//! Windows: the elevated copy runs hidden and writes its output to a temp file that this process prints,
-//! so the user sees the answer (a join code, a status) in the same terminal after one UAC prompt.
+//! Windows: the elevated copy runs hidden and writes its output into a named pipe that this process prints,
+//! so the user sees the answer (a join code, a status) in the same terminal after one UAC prompt. The CI
+//! runners are already elevated, so this path is only covered by the pipe-name unit test.
 
 #[cfg(unix)]
 use std::process::Command;
@@ -98,6 +99,13 @@ fn win_quote(a: &str) -> String {
     out
 }
 
+/// `\\.\pipe\gangli-elevated-<pid>-<random>` (the leading `\\.\` is the local pipe namespace: without it
+/// Windows answers "the filename, directory name, or volume label syntax is incorrect", os error 123).
+#[cfg(windows)]
+fn pipe_name(pid: u32, random: &str) -> String {
+    format!(r"\\.\pipe\gangli-elevated-{pid}-{random}")
+}
+
 #[cfg(windows)]
 fn relaunch_elevated() -> std::io::Result<()> {
     use std::io::Read;
@@ -111,7 +119,7 @@ fn relaunch_elevated() -> std::io::Result<()> {
 
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain([0]).collect() };
     // The elevated copy writes its output into a named pipe that this process reads: nothing on disk.
-    let pipe_name = format!(r"\.\pipe\gangli-elevated-{}-{}", std::process::id(), data_encoding::HEXLOWER.encode(&crate::util::random16()[..6]));
+    let pipe_name = pipe_name(std::process::id(), &data_encoding::HEXLOWER.encode(&crate::util::random16()[..6]));
     const PIPE_ACCESS_INBOUND: u32 = 0x1;
     let pipe = unsafe { CreateNamedPipeW(wide(&pipe_name).as_ptr(), PIPE_ACCESS_INBOUND, 0, 1, 0, 65536, 0, std::ptr::null()) };
     if pipe == INVALID_HANDLE_VALUE {
@@ -239,5 +247,16 @@ mod tests {
         assert_eq!(super::win_quote("a b"), "\"a b\"");
         assert_eq!(super::win_quote(r"C:\x y\"), "\"C:\\x y\\\\\"");
         assert_eq!(super::win_quote("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn pipe_name_is_in_the_pipe_namespace() {
+        let n = super::pipe_name(42, "abc");
+        assert!(n.starts_with(r"\\.\pipe\"), "{n}");
+        // and the system takes it
+        let wide: Vec<u16> = n.encode_utf16().chain([0]).collect();
+        let h = unsafe { windows_sys::Win32::System::Pipes::CreateNamedPipeW(wide.as_ptr(), 0x1, 0, 1, 0, 4096, 0, std::ptr::null()) };
+        assert_ne!(h, windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE, "{}", std::io::Error::last_os_error());
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
     }
 }
