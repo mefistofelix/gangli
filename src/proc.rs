@@ -413,6 +413,8 @@ mod imp {
     use super::{reader_thread, Child, In, Out, Spec};
 
     const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
+    const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
+    const SW_HIDE: u16 = 0;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     fn wide(s: &str) -> Vec<u16> {
@@ -623,7 +625,11 @@ mod imp {
                     let (err_r, err_w) = pipe(false, true)?;
                     let mut si: STARTUPINFOW = std::mem::zeroed();
                     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-                    si.dwFlags = STARTF_USESTDHANDLES;
+                    // No window on the user's screen, for this process nor what it starts: no console window
+                    // (CREATE_NO_WINDOW) and a hidden first window (SW_HIDE), which also keeps Windows 11's
+                    // default terminal from popping up for an instant.
+                    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+                    si.wShowWindow = SW_HIDE;
                     si.hStdInput = in_r;
                     si.hStdOutput = out_w;
                     si.hStdError = err_w;

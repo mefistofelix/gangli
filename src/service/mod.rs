@@ -67,10 +67,13 @@ pub(crate) fn finish_uninstall() -> io::Result<()> {
 
 #[cfg(windows)]
 fn icacls(args: &[&str]) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW: the window (no console of its own) would otherwise flash a console on screen.
     let st = std::process::Command::new("icacls")
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
         .status()?;
     if !st.success() {
         return Err(other(format!("icacls {} failed", args.first().unwrap_or(&""))));
