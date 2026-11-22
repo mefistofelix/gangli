@@ -258,6 +258,9 @@ async function selftest() {
 }
 function route() {
   const h = new URLSearchParams(location.hash.slice(1));
+  if (location.hash.length < 2) return;
+  // a new QR scanned in the same tab: start from a clean screen
+  $("save").hidden = true; $("pair").hidden = true; say("msg", "", ""); say("pair-msg", "", ""); render();
   if (h.has("net")) showSave(h.get("net"), h.get("name"));
   else if (h.has("pair")) showPair(h.get("pair"));
   else if (h.has("selftest")) selftest();
