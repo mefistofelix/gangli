@@ -370,6 +370,14 @@ logged in now (`proc::logged_in`: Windows sessions, the macOS console user, Linu
 in or on battery and the charge (`power::source`; the charge counts for a push only by fifths), and how it
 reaches the Internet (section 4).
 
+**Place [decided 2026-11-22]**: the open console looks up where each machine is (city, region, country)
+from its public address with DB-IP's free API (`api.db-ip.com/v2/free/<ip>`, the free edition of a
+standard GeoIP database; HTTPS, no key, 1,000 a day), once per address, a few a minute at most, and keeps
+the answers in `gangli.console` (`places`). The address goes to DB-IP, nothing else; `geoip = false` in
+`[console]` turns it off. A GeoIP city is often the provider's, not the house's (mobile networks above all).
+Machines list *Place*, machine details, `gangli info`, API `nodes` / `info` → `place`; the console's own
+in *This computer → Network*. Lookups are console-side only: a node never calls out for this.
+
 **Power [decided 2026-11-22]**: a managed machine that sleeps or hibernates is offline until someone wakes
 it (seen on the aunt's laptop: S3 sleep). The owner reads and sets a machine's sleep and hibernation
 timeouts, plugged in and on battery, from a console (machine details → *Sleep settings…*, `gangli power NODE

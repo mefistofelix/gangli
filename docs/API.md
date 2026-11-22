@@ -64,7 +64,8 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
 
 **The state of each machine** is in `nodes` / `info`: `online`, `since` (this session) or `last_seen`, and
 while online `path`: `relay` (true: through a relay, slower; false: direct), `rtt_ms`, `remote`, `paths`
-(every path iroh has, the one in use first), and the
+(every path iroh has, the one in use first), `place` (city, region, country from its public address;
+empty until known), and the
 traffic of the whole connection, `rx_bps` / `tx_bps` (bytes per second, received / sent). A machine that goes
 away comes back by itself (its node knocks); check `online` before acting, and retry an `exec` that failed
 because it went offline. A background job (`job_start`) keeps running on the machine while the console is

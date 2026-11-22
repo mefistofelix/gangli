@@ -184,6 +184,16 @@ pub fn info(node: &str, json: bool) -> Result<()> {
         println!("  disk      {} {} free of {}", d.mount, human_bytes(d.avail), human_bytes(d.total));
     }
     println!("  lan       {}", inv.ips.join(", "));
+    if let Some(p) = v["place"].as_str().filter(|p| !p.is_empty()) {
+        println!("  place     {p}");
+    }
+    if !inv.logged_in.is_empty() {
+        println!("  logged in {}", inv.logged_in.join(", "));
+    }
+    let power = inv.power_label();
+    if !power.is_empty() {
+        println!("  power     {power}");
+    }
     println!(
         "  access    {}",
         if inv.full_access { format!("full (runs as {})", inv.service_user) } else { format!("only {}", inv.service_user) }

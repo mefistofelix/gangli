@@ -114,6 +114,9 @@ pub struct NodeView {
     pub path: Option<PathInfo>,
     #[serde(default)]
     pub inventory: Option<Inventory>,
+    /// Where it is, from its public address ("Milan, Lombardy, Italy (IT)"); empty: not known.
+    #[serde(default)]
+    pub place: String,
 }
 
 /// Port and token of this folder's console.

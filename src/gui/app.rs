@@ -733,10 +733,11 @@ impl App {
         let t = now();
         let mut nodes = self.nodes.clone();
         nodes.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
-        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 10 } else { 9 }).spacing([14.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 11 } else { 10 }).spacing([14.0, 8.0]).show(ui, |ui| {
             ui.label("");
             ui.label(RichText::new("Name").strong());
             ui.label(RichText::new("User").strong()).on_hover_text("Who is logged in on it now");
+            ui.label(RichText::new("Place").strong()).on_hover_text("Where it is, from its public address (GeoIP: the city can be the provider's)");
             ui.label(RichText::new("System").strong());
             ui.label(RichText::new("gangli").strong()).on_hover_text("The gangli version it runs");
             ui.label(RichText::new("LAN address").strong());
@@ -760,6 +761,12 @@ impl App {
                     self.terms_polled = None;
                 }
                 ui.label(inv.user_label());
+                // The list shows the city and country; the details the whole place.
+                let short = n.place.split(", ").next().map(|city| match n.place.rsplit_once(" (") {
+                    Some((_, cc)) if n.place.contains(", ") => format!("{city} ({cc}"),
+                    _ => n.place.clone(),
+                });
+                ui.label(short.unwrap_or_default()).on_hover_text(n.place.as_str());
                 ui.label(inv.os_label());
                 let old = !inv.version.is_empty() && inv.version != crate::build_version();
                 let color = if old { AMBER } else { ui.visuals().text_color() };
@@ -930,6 +937,9 @@ impl App {
             let access = if inv.full_access { "full" } else { "this user only" };
             row("Runs as", format!("{} ({access})", inv.service_user));
             row("Logged in", if inv.logged_in.is_empty() { "nobody".into() } else { inv.logged_in.join(", ") });
+            if !n.place.is_empty() {
+                row("Place", n.place.clone());
+            }
             let power = inv.power_label();
             if !power.is_empty() {
                 row("Power", power);
@@ -1363,6 +1373,9 @@ impl App {
                 ui.end_row();
             };
             row("Internet", s(&n["summary"]).to_string());
+            if !s(&n["place"]).is_empty() {
+                row("Place", s(&n["place"]).to_string());
+            }
             row("UDP port", crate::console_cmd::udp_port_text(&n));
         });
         ui.label(

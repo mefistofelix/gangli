@@ -101,6 +101,13 @@ pub struct ConsoleConf {
     /// The public IPv4 address the last probe was for (probing again only when it changes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub udp_probed: String,
+    /// Where machines are (country, city) from their public address, asked of DB-IP's free service once
+    /// per address; `false`: never ask.
+    #[serde(default = "yes")]
+    pub geoip: bool,
+    /// Public address → "City, Region, Country (CC)", the answers kept.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub places: std::collections::BTreeMap<String, String>,
 }
 
 fn default_port() -> u16 {
@@ -118,6 +125,8 @@ impl Default for ConsoleConf {
             udp_port: None,
             udp_port_found: false,
             udp_probed: String::new(),
+            geoip: true,
+            places: Default::default(),
         }
     }
 }
@@ -327,6 +336,7 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         tokio::spawn(manager(c.clone()));
         tokio::spawn(directory_loop(c.clone()));
         tokio::spawn(probe_loop(c.clone()));
+        tokio::spawn(place_loop(c.clone()));
         tokio::spawn(watch_file(c.clone()));
         clog(&format!("{} open on 127.0.0.1:{port}, id {me}", crate::version_line()));
     }
@@ -940,6 +950,102 @@ async fn probe_ports(c: &Arc<Console>, again: bool) -> Result<Option<u16>> {
     Ok(found)
 }
 
+/// A machine's public address without its port: IPv4, else IPv6.
+fn public_ip(n: &crate::inventory::NetInfo) -> Option<String> {
+    let strip = |a: &str| -> Option<String> {
+        let a: std::net::SocketAddr = a.parse().ok()?;
+        Some(a.ip().to_string())
+    };
+    strip(&n.public_v4).or_else(|| strip(&n.public_v6))
+}
+
+/// Open console: where its machines (and itself) are, from their public addresses, asked of DB-IP's free
+/// service (the free edition of a standard GeoIP database: country, region, city) once per address and kept
+/// in `gangli.console`. A few a minute at most; only addresses not asked yet; nothing with `geoip = false`.
+async fn place_loop(c: Arc<Console>) {
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    // Two rustls providers are in the tree (iroh's, ring): reqwest needs the default one named.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http = match reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent("gangli").build() {
+        Ok(h) => h,
+        Err(e) => {
+            clog(&format!("places: no HTTPS client ({e})"));
+            return;
+        }
+    };
+    loop {
+        let (on, mut want) = {
+            let st = c.state.lock().unwrap();
+            let known = &st.console.places;
+            let mut want: Vec<String> = st
+                .networks
+                .iter()
+                .flat_map(|n| n.nodes.iter())
+                .filter_map(|x| x.inventory.as_ref().and_then(|i| public_ip(&i.net)))
+                .filter(|ip| !known.contains_key(ip))
+                .collect();
+            want.sort();
+            want.dedup();
+            (st.console.geoip, want)
+        };
+        if let Some(mine) = public_ip(&crate::util::net_info(c.endpoint())) {
+            if !c.state.lock().unwrap().console.places.contains_key(&mine) && !want.contains(&mine) {
+                want.insert(0, mine);
+            }
+        }
+        if on && !want.is_empty() {
+            let mut got = false;
+            for ip in want.into_iter().take(5) {
+                match lookup_place(&http, &ip).await {
+                    Ok(place) => {
+                        let mut st = c.state.lock().unwrap();
+                        st.console.places.insert(ip, place);
+                        got = true;
+                        // Kept small (200 addresses): an address dropped is asked again if it comes back.
+                        while st.console.places.len() > 200 {
+                            let k = st.console.places.keys().next().cloned().unwrap_or_default();
+                            st.console.places.remove(&k);
+                        }
+                    }
+                    Err(e) => {
+                        clog(&format!("place of {ip}: {e:#}"));
+                        break;
+                    }
+                }
+            }
+            if got {
+                c.save();
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+/// "Milan, Lombardy, Italy (IT)" for a public address (DB-IP free API: 1,000 a day, no key).
+async fn lookup_place(http: &reqwest::Client, ip: &str) -> Result<String> {
+    let body = http.get(format!("https://api.db-ip.com/v2/free/{ip}")).send().await?.error_for_status()?.bytes().await?;
+    let v: Value = serde_json::from_slice(&body)?;
+    if let Some(e) = v["error"].as_str() {
+        bail!("{e}");
+    }
+    let mut parts: Vec<&str> = vec![];
+    for k in ["city", "stateProv", "countryName"] {
+        if let Some(s) = v[k].as_str().filter(|s| !s.is_empty()) {
+            if !parts.contains(&s) {
+                parts.push(s);
+            }
+        }
+    }
+    let mut out = parts.join(", ");
+    if let Some(cc) = v["countryCode"].as_str().filter(|s| !s.is_empty() && *s != "ZZ") {
+        out = format!("{out} ({cc})");
+    }
+    if out.is_empty() {
+        bail!("no place known");
+    }
+    Ok(out)
+}
+
 /// How this console reaches the Internet, and its UDP port: `port` the one in use, `fixed` the one in
 /// `gangli.console` (`found`: by the probe, else by hand), `restart`: a restart would move to it.
 fn net_status(c: &Console, k: &ConsoleConf) -> Value {
@@ -956,6 +1062,7 @@ fn net_status(c: &Console, k: &ConsoleConf) -> Value {
         "found": k.udp_port_found,
         "probed": k.udp_probed,
         "restart": k.udp_port.is_some_and(|p| p != n.port),
+        "place": public_ip(&n).and_then(|ip| k.places.get(&ip).cloned()).unwrap_or_default(),
     })
 }
 
@@ -1484,6 +1591,7 @@ fn node_views(c: &Console, network: Option<&str>) -> Vec<NodeView> {
                 since: l.map(|l| l.since),
                 last_seen: x.last_seen,
                 path: l.and_then(|l| c.path_now(&x.id, &l.conn)),
+                place: x.inventory.as_ref().and_then(|i| public_ip(&i.net)).and_then(|ip| st.console.places.get(&ip).cloned()).unwrap_or_default(),
                 inventory: x.inventory.clone(),
             });
         }
@@ -1650,7 +1758,8 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let Resp::Info { node_name, inventory } = proto::request(&conn, &Req::Info).await? else {
                 bail!("unexpected answer");
             };
-            Ok(json!({ "network": net_name, "node": node_name, "id": node_id, "path": proto::path_info(&conn), "inventory": inventory }))
+            let place = public_ip(&inventory.net).and_then(|ip| c.state.lock().unwrap().console.places.get(&ip).cloned()).unwrap_or_default();
+            Ok(json!({ "network": net_name, "node": node_name, "id": node_id, "path": proto::path_info(&conn), "inventory": inventory, "place": place }))
         }
         IpcOp::Forget { node } => {
             let (net_id, _, node_id) = find_node(c, &node)?;

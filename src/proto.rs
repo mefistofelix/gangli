@@ -181,7 +181,7 @@ pub enum Req {
     JobList,
     JobOutput { id: String, from: u64 },
     JobKill { id: String },
-    /// Console → node: a new binary follows (`size` raw bytes after this frame), signed with the release key.
+    /// Console → node: a new binary follows (`size` raw bytes after this frame); tried before it is put in place.
     Update { size: u64 },
     /// Console → node: send one UDP datagram holding `token` to each of `ports` of `ip` (the console's public
     /// IPv4), paced, to find a port its router forwards to it. At most [`PROBE_MAX`] ports a request.

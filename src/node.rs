@@ -1078,7 +1078,8 @@ fn job_output(id: &str, from: u64) -> Result<Resp> {
     Ok(Resp::JobOutput { data, from: start, next: j.base + j.buf.len() as u64, running: j.ended.is_none(), exit: j.exit })
 }
 
-/// A new binary from a console: verify the release signature, swap, restart.
+/// A new binary from an authenticated console (which can already run anything here): check that it is a
+/// gangli for this system and that it starts (update.rs), swap, restart.
 async fn receive_update<W, R>(mut send: W, mut recv: R, size: u64)
 where
     W: AsyncWrite + Unpin + Send + 'static,
