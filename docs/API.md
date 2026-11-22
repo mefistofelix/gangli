@@ -45,6 +45,13 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
 
 - `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`: shortcuts for `status`, `nodes`, `info`.
 
+**The state of each machine** is in `nodes` / `info`: `online`, `since` (this session) or `last_seen`, and
+while online `path`: `relay` (true: through a relay, slower; false: direct), `rtt_ms`, `remote`, and the
+traffic of the whole connection, `rx_bps` / `tx_bps` (bytes per second, received / sent). A machine that goes
+away comes back by itself (its node knocks); check `online` before acting, and retry an `exec` that failed
+because it went offline. A background job (`job_start`) keeps running on the machine while the console is
+away; it ends if the machine itself restarts.
+
 A machine is its name, or `name.network` when two networks have one with that name. `user` is an account on
 the machine, `system` (root / SYSTEM) or `desktop` (whoever is at the screen); without it, the desktop user
 when there is one, else the service account.
@@ -55,6 +62,13 @@ The console also runs an SSH gateway on `127.0.0.1:2222`: the login is `user+mac
 `user+machine+name` opens the persistent terminal `name`. An agent adds its public key once
 (`ssh_login_add`, as above), then uses any client: `ssh -p 2222 root+nas@127.0.0.1 uptime`, `scp -P 2222 …`,
 `ssh -L 8080:192.168.1.10:80 …`. `{"op": "ssh_password", "node": "nas"}` gives a password instead.
+
+The SSH client talks to the local gateway, so it never sees a machine go away. An interactive shell then
+waits: the gateway writes `[gangli: the machine is not reachable: this session goes on when it is back]` and,
+when it is, goes on in the same session (a persistent terminal reattached with its screen, else a new shell,
+said in a dim line). A command (`ssh … uptime`) fails instead, with an error saying it may not have
+finished. To find a screen again after closing the SSH client itself, use a persistent terminal
+(`user+machine+name`).
 
 For people: put your key in a rule for `*` machines and `*` users (SSH page of the window, or
 `gangli ssh login add --key "ssh-ed25519 …"`), and PuTTY / WinSCP opened from the window log in with Pageant,

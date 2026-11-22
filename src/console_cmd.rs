@@ -255,7 +255,7 @@ fn print_api(v: &Value) {
 }
 
 pub fn api(op: IpcOp, json: bool, save: Option<std::path::PathBuf>) -> Result<()> {
-    let adding = matches!(op, IpcOp::ApiTokenAdd { .. });
+    let adding = matches!(op, IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenShow { .. });
     let v = ipc::call(op)?;
     if let (true, Some(path)) = (adding, &save) {
         // The token with what an AI agent needs to use it, readable by this user only.
@@ -280,7 +280,7 @@ pub fn api(op: IpcOp, json: bool, save: Option<std::path::PathBuf>) -> Result<()
     } else if adding {
         println!("{}", v["token"].as_str().unwrap_or(""));
         eprintln!(
-            "token {} (scope {}): shown only now. Use it as `Authorization: Bearer <token>` on {}{}",
+            "token {} (scope {}): use it as `Authorization: Bearer <token>` on {}{}",
             v["name"].as_str().unwrap_or(""),
             v["scope"].as_str().unwrap_or(""),
             v["url"].as_str().unwrap_or(""),

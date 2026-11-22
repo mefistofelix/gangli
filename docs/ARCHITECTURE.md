@@ -288,6 +288,16 @@ Placeholders: `{node}`, `{network}`, `{user}`, `{login}` (= `user@node`), `{logi
 The GUI's terminal ("Terminal here", section 12) uses the same node-side session protocol directly (no SSH),
 resumable, and attaches to the persistent terminals of section 6 as well. Implemented 2026-11-20.
 
+**A tab outlives its session [decided 2026-11-22]**: when the stream cannot be resumed (the machine restarted,
+or stayed away past what the node keeps), the tab says so and waits for the machine, then goes on in the
+same tab with the screen kept: a persistent terminal is reattached by name, otherwise a new shell starts,
+with a dim line saying which. After the shell ends, Enter starts a new one there; a refusal (unknown user)
+waits for Enter to try again. Keys typed while the machine is away are dropped, not replayed into the next
+shell. Each tab shows its link: a dot (green direct, amber relay or reconnecting, grey ended, red failed),
+and under the tabs the active one's path, RTT and its own traffic per second; hovering a tab shows the
+details and the traffic of the whole connection with that machine (`conn.stats()` bytes, sampled each
+second).
+
 **Images in the terminal** (Kitty graphics protocol, sixel, iTerm2 inline images) are escape sequences in the
 terminal stream: the gateway and the node's PTY carry them untouched, so they work from Linux / macOS nodes when
 the local terminal supports them (kitty, WezTerm, Ghostty, iTerm2; Windows Terminal: sixel; not PuTTY).
@@ -416,16 +426,21 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
 - **Native GUI** (egui) **[decided: native, not browser]** (`src/gui/`), one window, unified, in English
   **[decided 2026-11-21]**. `gangli gui`, or a double click (Windows:
   the console window made for the double click is released; Linux / macOS: started without a terminal):
-  - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, since / last seen),
+  - *Machines*: live list (online dot, system, LAN address, link direct / relay with RTT, traffic received /
+    sent per second, since / last seen),
     filter; a machine's panel: a **terminal inside the window** ("Terminal here"), or each launcher (PuTTY,
     OpenSSH, WinSCP…), as a chosen user and optionally in a persistent terminal; copy the gateway password or an `ssh` command line, its persistent
     terminals (open / close), its tunnels (add), inventory, update from a release folder, forget;
-  - *Networks*: create (dialog with the network's QR for the phone wallet, the public code, and the private
-    one hidden until asked), codes, relays (extra ones, sent to its machines; the console's own relay shown), add one with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
+  - *Networks*: the networks, each with codes, relays (extra ones, sent to its machines; the console's own
+    relay shown) and remove; one *New network…* button at the top opens a dialog: create one (then the
+    dialog with its QR for the phone wallet, the public code, and the private one hidden until asked) or add
+    one already owned with its private code; "prepare a gangli" writes a copy of this binary with the public code
     embedded next to it, for a relative;
   - *Tunnels*: list with on / off and state, add, remove;
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
-  - *API*: on / off, tokens (made here, shown once; revoke);
+  - *API*: *New token…* at the top (name, scope), then the tokens, each with *Copy token*, *Copy
+    instructions* (for an AI agent) and *Revoke*, at any time (`gangli api token show NAME [--save FILE]`);
+    on / off;
   - *This computer* (node): **a summary of its networks [decided 2026-11-22]**: for each, admitted or not
     (and why not), its name there, the consoles connected now (and since when) or when the last one left,
     and *Leave*; **pair with your phone** (section 10), join with a public code (prefilled when embedded),

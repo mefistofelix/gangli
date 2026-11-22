@@ -330,7 +330,7 @@ enum TunnelCmd {
 
 #[derive(Subcommand)]
 enum TokenCmd {
-    /// Make a token (printed once).
+    /// Make a token (`token show` prints it again).
     Add {
         name: String,
         /// read: machines and their details. exec: also commands, jobs, terminals. admin: everything the CLI and
@@ -343,6 +343,12 @@ enum TokenCmd {
     },
     /// Revoke a token.
     Remove { name: String },
+    /// A token again (with `--save`: with the instructions for an AI agent, in a file).
+    Show {
+        name: String,
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+    },
     /// The tokens (names and scopes, never the values).
     List,
 }
@@ -450,7 +456,7 @@ fn main() {
         Some(Command::Console(ConsoleCmd::Status)) => console_cmd::status(json),
         Some(Command::Api(a)) => {
             let save = match &a {
-                ApiCmd::Token(TokenCmd::Add { save, .. }) => save.clone(),
+                ApiCmd::Token(TokenCmd::Add { save, .. }) | ApiCmd::Token(TokenCmd::Show { save, .. }) => save.clone(),
                 _ => None,
             };
             let op = match a {
@@ -459,6 +465,7 @@ fn main() {
                 ApiCmd::Disable => ipc::IpcOp::ApiDisable,
                 ApiCmd::Token(TokenCmd::Add { name, scope, .. }) => ipc::IpcOp::ApiTokenAdd { name, scope },
                 ApiCmd::Token(TokenCmd::Remove { name }) => ipc::IpcOp::ApiTokenRemove { name },
+                ApiCmd::Token(TokenCmd::Show { name, .. }) => ipc::IpcOp::ApiTokenShow { name },
             };
             console_cmd::api(op, json, save)
         }

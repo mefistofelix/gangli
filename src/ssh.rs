@@ -315,23 +315,18 @@ impl Conn {
         let chan = self.chans.entry(channel).or_default();
         let (tx, rx) = mpsc::unbounded_channel();
         chan.tx = Some(tx);
-        let req = match (&t.term, &command) {
+        let spec = Spec {
             // A shell request with a terminal name: attach to the persistent terminal.
-            (Some(name), None) => {
-                let (cols, rows) = chan.pty.unwrap_or((80, 24));
-                Req::Attach { name: name.clone(), user: t.user.clone(), cols, rows }
-            }
-            _ => Req::Shell {
-                user: t.user.clone(),
-                command,
-                pty: chan.pty,
-                term: if chan.term.is_empty() { "xterm-256color".into() } else { chan.term.clone() },
-            },
+            attach: if command.is_none() { t.term.clone() } else { None },
+            user: t.user.clone(),
+            command,
+            pty: chan.pty,
+            term: if chan.term.is_empty() { "xterm-256color".into() } else { chan.term.clone() },
         };
         let (c, net, node, handle) = (self.c.clone(), t.net.clone(), t.node.clone(), session.handle());
         session.channel_success(channel)?;
         tokio::spawn(async move {
-            let code = match bridge(&c, &net, &node, req, rx, &handle, channel).await {
+            let code = match bridge(&c, &net, &node, spec, rx, &handle, channel).await {
                 Ok(code) => code,
                 Err(e) => {
                     let _ = handle.extended_data(channel, 1, format!("gangli: {e:#}\r\n").into_bytes()).await;
@@ -346,55 +341,143 @@ impl Conn {
     }
 }
 
-/// One SSH session channel ↔ one node session stream. Returns the exit code.
+/// What an SSH session channel asks the machine for.
+struct Spec {
+    /// A persistent terminal to attach to (`user+machine+name`, a shell request).
+    attach: Option<String>,
+    user: String,
+    command: Option<String>,
+    pty: Option<(u16, u16)>,
+    term: String,
+}
+
+impl Spec {
+    fn req(&self) -> Req {
+        match &self.attach {
+            Some(name) => {
+                let (cols, rows) = self.pty.unwrap_or((80, 24));
+                Req::Attach { name: name.clone(), user: self.user.clone(), cols, rows }
+            }
+            None => Req::Shell { user: self.user.clone(), command: self.command.clone(), pty: self.pty, term: self.term.clone() },
+        }
+    }
+
+    /// An interactive shell (a terminal, no command): it outlives the machine going away.
+    fn interactive(&self) -> bool {
+        self.command.is_none() && (self.pty.is_some() || self.attach.is_some())
+    }
+}
+
+/// One SSH session channel ↔ node session streams. Returns the exit code.
+///
+/// Each stream is resumable (it survives connection drops). When one cannot be resumed (the machine
+/// restarted, or stayed away too long), an interactive shell does not end: the SSH client, connected to this
+/// local gateway, keeps its window and its screen; the gateway says the machine is away, waits for it, then
+/// goes on in the same channel (the persistent terminal reattached, or a new shell), saying so. A command
+/// (`ssh machine cmd`) fails instead: a program must know it did not finish.
 async fn bridge(
     c: &Arc<Console>,
     net: &str,
     node: &str,
-    req: Req,
+    mut spec: Spec,
     mut rx: mpsc::UnboundedReceiver<ToNode>,
     handle: &russh::server::Handle,
     channel: ChannelId,
 ) -> Result<i32> {
-    // Resumable: the session survives connection drops (its process waits on the machine up to a day).
-    let (app, resp) = console::open_resumable(c, net, node, req, Duration::from_secs(24 * 3600)).await?;
-    if !matches!(resp, Resp::Started) {
-        bail!("unexpected answer");
-    }
-    let (mut recv, mut send) = tokio::io::split(app);
-    let writer = tokio::spawn(async move {
-        while let Some(m) = rx.recv().await {
-            let r = match m {
-                ToNode::Data(d) => sframe::write(&mut send, sframe::DATA, &d).await,
-                ToNode::Resize(cols, rows) => sframe::write(&mut send, sframe::RESIZE, &sframe::resize(cols, rows)).await,
-                ToNode::Eof => sframe::write(&mut send, sframe::EOF, &[]).await,
-            };
-            if r.is_err() {
-                break;
+    let say = |text: String| async move {
+        let _ = handle.data(channel, format!("\r\n\x1b[2m[gangli: {text}]\x1b[0m\r\n").into_bytes()).await;
+    };
+    let mut why: Option<String> = None;
+    let mut waiting_said = false;
+    loop {
+        let app = match console::open_resumable(c, net, node, spec.req(), Duration::from_secs(24 * 3600)).await {
+            Ok((app, Resp::Started)) => app,
+            Ok(_) => bail!("unexpected answer"),
+            Err(e) if !spec.interactive() || why.is_none() || c.link(node).is_some() => return Err(e),
+            Err(_) => {
+                if !waiting_said {
+                    waiting_said = true;
+                    say("the machine is not reachable: this session goes on when it is back".into()).await;
+                }
+                // Typed meanwhile: dropped (not for the next shell); the size is kept; closing ends it.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Err(_) => break,
+                        Ok(None) => return Ok(255),
+                        Ok(Some(ToNode::Resize(cols, rows))) => spec.pty = Some((cols, rows)),
+                        Ok(Some(_)) => {}
+                    }
+                }
+                continue;
             }
-        }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
-    });
-    let code = loop {
-        let (kind, body) = match sframe::read(&mut recv).await {
-            Ok(f) => f,
-            Err(_) => break 255,
         };
-        match kind {
-            sframe::DATA => {
-                if handle.data(channel, body).await.is_err() {
-                    break 255;
+        waiting_said = false;
+        if let Some(w) = why.take() {
+            let what = match &spec.attach {
+                Some(n) => format!("{w}: reattached to the persistent terminal {n}"),
+                None => format!("{w}: a new shell"),
+            };
+            say(what).await;
+        }
+        let (mut recv, mut send) = tokio::io::split(app);
+        if let Some((cols, rows)) = spec.pty {
+            let _ = sframe::write(&mut send, sframe::RESIZE, &sframe::resize(cols, rows)).await;
+        }
+        // The reader runs apart: a frame half read must never be cut by the select below.
+        let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            loop {
+                let r = sframe::read(&mut recv).await.map_err(|_| ());
+                let stop = r.is_err();
+                if ev_tx.send(r).is_err() || stop {
+                    break;
                 }
             }
-            sframe::STDERR => {
-                let _ = handle.extended_data(channel, 1, body).await;
+        });
+        let exit = loop {
+            tokio::select! {
+                m = rx.recv() => {
+                    let Some(m) = m else {
+                        reader.abort();
+                        return Ok(255);
+                    };
+                    let r = match m {
+                        ToNode::Data(d) => sframe::write(&mut send, sframe::DATA, &d).await,
+                        ToNode::Resize(cols, rows) => {
+                            spec.pty = Some((cols, rows));
+                            sframe::write(&mut send, sframe::RESIZE, &sframe::resize(cols, rows)).await
+                        }
+                        ToNode::Eof => sframe::write(&mut send, sframe::EOF, &[]).await,
+                    };
+                    if r.is_err() {
+                        break None;
+                    }
+                }
+                e = ev_rx.recv() => match e {
+                    Some(Ok((sframe::DATA, body))) => {
+                        if handle.data(channel, body).await.is_err() {
+                            reader.abort();
+                            return Ok(255);
+                        }
+                    }
+                    Some(Ok((sframe::STDERR, body))) => {
+                        let _ = handle.extended_data(channel, 1, body).await;
+                    }
+                    Some(Ok((sframe::EXIT, body))) if body.len() >= 4 => break Some(i32::from_be_bytes(body[..4].try_into().unwrap())),
+                    Some(Ok(_)) => {}
+                    _ => break None,
+                }
             }
-            sframe::EXIT if body.len() >= 4 => break i32::from_be_bytes(body[..4].try_into().unwrap()),
-            _ => {}
+        };
+        reader.abort();
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
+        match exit {
+            Some(code) => return Ok(code),
+            None if spec.interactive() => why = Some("connection lost".into()),
+            None => bail!("the connection with the machine was lost: the command may not have finished"),
         }
-    };
-    writer.abort();
-    Ok(code)
+    }
 }
 
 fn key_matches(rule: &LoginRule, key: &russh::keys::PublicKey) -> bool {

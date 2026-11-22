@@ -208,6 +208,8 @@ pub struct Console {
     tunnels: Mutex<HashMap<String, (Tunnel, tokio::task::JoinHandle<()>)>>,
     /// Relays the networks added to this console's endpoint at runtime.
     relays_applied: Mutex<Vec<String>>,
+    /// Node id → last traffic sample of its connection: (when, bytes received, bytes sent, rates).
+    rates: Mutex<HashMap<String, (Instant, u64, u64, u64, u64)>>,
     /// A GUI window owns this console: another `gangli` started here asks it to come up.
     pub gui: std::sync::atomic::AtomicBool,
     pub gui_show: Notify,
@@ -288,6 +290,7 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         saved_at: Mutex::new(store::modified(&path())),
         tunnels: Mutex::default(),
         relays_applied: Mutex::default(),
+        rates: Mutex::default(),
         gui: Default::default(),
         gui_show: Notify::new(),
     });
@@ -729,6 +732,29 @@ impl Console {
         self.live.lock().unwrap().get(node).map(|l| l.conn.clone())
     }
 
+    /// How this console reaches a machine now: direct or relayed, RTT, traffic per second; `None` while it
+    /// has no session with it.
+    pub(crate) fn link(&self, node: &str) -> Option<proto::PathInfo> {
+        let conn = self.live_conn(node)?;
+        self.path_now(node, &conn)
+    }
+
+    /// The path of a live connection, with its traffic rates (sampled at most once a second).
+    fn path_now(&self, node: &str, conn: &Connection) -> Option<proto::PathInfo> {
+        let mut p = proto::path_info(conn)?;
+        let s = conn.stats();
+        let (rx, tx) = (s.udp_rx.bytes, s.udp_tx.bytes);
+        let mut rates = self.rates.lock().unwrap();
+        let e = rates.entry(node.to_string()).or_insert((Instant::now(), rx, tx, 0, 0));
+        let dt = e.0.elapsed().as_secs_f64();
+        if dt >= 1.0 {
+            *e = (Instant::now(), rx, tx, (rx.saturating_sub(e.1) as f64 / dt) as u64, (tx.saturating_sub(e.2) as f64 / dt) as u64);
+        }
+        p.rx_bps = e.3;
+        p.tx_bps = e.4;
+        Some(p)
+    }
+
     /// The directory this console would publish for `net` now.
     fn directory_now(&self, net: &str) -> Option<(SecretKey, Directory)> {
         let st = self.state.lock().unwrap();
@@ -1142,6 +1168,9 @@ pub fn agent_instructions(url: &str, token: &str, ssh_listen: &str) -> String {
          - Tunnel to an address on a machine's network:\n\
            {{\"op\":\"tunnel_add\",\"name\":\"nas-web\",\"node\":\"NAME\",\"target\":\"192.168.1.10:80\",\"listen\":\"8080\"}}\n\
          - A machine is NAME, or NAME.NETWORK when two networks have one with that name.\n\
+         - Machines can go away and come back by themselves: check \"online\" (and \"path\": relay or direct,\n\
+           rtt_ms, rx_bps / tx_bps) before acting, and retry when one was offline. An interactive SSH shell\n\
+           waits for the machine and goes on; an SSH command fails if the machine went away meanwhile.\n\
          - Answers are {{\"ok\":true,\"data\":...}} or {{\"ok\":false,\"error\":\"...\"}}.\n\
          \n\
          If the `gangli` command works here, `gangli <command> --json` does the same without a token\n\
@@ -1256,7 +1285,7 @@ fn node_views(c: &Console, network: Option<&str>) -> Vec<NodeView> {
                 online: l.is_some(),
                 since: l.map(|l| l.since),
                 last_seen: x.last_seen,
-                path: l.and_then(|l| proto::path_info(&l.conn)),
+                path: l.and_then(|l| c.path_now(&x.id, &l.conn)),
                 inventory: x.inventory.clone(),
             });
         }
@@ -1452,6 +1481,13 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let url = format!("http://127.0.0.1:{port}/v1");
             let instructions = agent_instructions(&url, &token, &listen);
             Ok(json!({ "name": name, "scope": scope, "token": token, "url": url, "enabled": enabled, "instructions": instructions }))
+        }
+        IpcOp::ApiTokenShow { name } => {
+            let st = c.state.lock().unwrap();
+            let t = st.api.tokens.iter().find(|t| t.name == name).ok_or_else(|| anyhow!("no token named {name}"))?;
+            let url = format!("http://127.0.0.1:{}/v1", st.console.port);
+            let instructions = agent_instructions(&url, &t.token, &st.ssh.listen);
+            Ok(json!({ "name": t.name, "scope": t.scope, "token": t.token, "url": url, "enabled": st.api.enabled, "instructions": instructions }))
         }
         IpcOp::ApiTokenRemove { name } => {
             let removed = {

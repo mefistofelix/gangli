@@ -33,6 +33,11 @@ pub struct PathInfo {
     pub relay: bool,
     pub rtt_ms: u64,
     pub remote: String,
+    /// Traffic of the whole connection with the machine, bytes per second (received, sent).
+    #[serde(default)]
+    pub rx_bps: u64,
+    #[serde(default)]
+    pub tx_bps: u64,
 }
 
 /// A node as the consoles know it.
@@ -230,7 +235,7 @@ pub fn path_info(conn: &Connection) -> Option<PathInfo> {
     let paths = conn.paths();
     let p = paths.iter().find(|p| p.is_selected())?;
     let remote = format!("{:?}", p.remote_addr());
-    Some(PathInfo { relay: p.is_relay(), rtt_ms: p.rtt().as_millis() as u64, remote: tidy_addr(&remote) })
+    Some(PathInfo { relay: p.is_relay(), rtt_ms: p.rtt().as_millis() as u64, remote: tidy_addr(&remote), ..Default::default() })
 }
 
 /// `Ip(1.2.3.4:5)` → `1.2.3.4:5`; relay addresses stay as they are.

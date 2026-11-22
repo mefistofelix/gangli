@@ -3,6 +3,7 @@
 //! by alacritty_terminal, drawn with egui. Mouse selection copies, right click or Ctrl+V pastes, the wheel
 //! scrolls back; the terminal's answers (cursor position, colours) go back to the program.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,8 +55,30 @@ impl EventListener for Listener {
 enum State {
     Connecting,
     Running,
+    /// The session is gone with the connection: waiting for the machine to come back (then it goes on in
+    /// this tab: a persistent terminal is reattached, else a new shell starts).
+    Reconnecting(String),
+    /// The shell ended: Enter starts a new one here.
     Exited(i32),
+    /// The machine answered no (or the name is unknown): Enter tries again.
     Failed(String),
+}
+
+/// What a tab shows about its link: a colour for its dot, a short line and the details.
+pub struct TabStatus {
+    pub color: Color32,
+    pub short: String,
+    pub detail: String,
+}
+
+/// Bytes per second, short: `830 B/s`, `12 kB/s`, `3.4 MB/s`.
+pub fn rate(bps: u64) -> String {
+    match bps {
+        0..=999 => format!("{bps} B/s"),
+        1000..=99_999 => format!("{:.1} kB/s", bps as f64 / 1e3).replace(".0 ", " "),
+        100_000..=999_999 => format!("{} kB/s", bps / 1000),
+        _ => format!("{:.1} MB/s", bps as f64 / 1e6),
+    }
 }
 
 struct Screen {
@@ -78,6 +101,40 @@ pub struct TermTab {
     focus_once: bool,
     /// Predictive echo: typed text shown at the cursor until the machine's echo arrives.
     predict: Predict,
+    console: Arc<Console>,
+    /// The machine's node id, once found.
+    node: Arc<Mutex<Option<String>>>,
+    /// Bytes of this terminal: received, sent; and the last rate sample (when, received, sent, rates).
+    io: Arc<(AtomicU64, AtomicU64)>,
+    sample: (std::time::Instant, u64, u64, u64, u64),
+}
+
+/// Typed while the machine is away: dropped, but the size is kept; `true` if Enter asks to retry now.
+/// `None`: the tab was closed.
+async fn idle(rx: &mut mpsc::UnboundedReceiver<ToNode>, size: &mut (u16, u16), wait: Option<Duration>) -> Option<bool> {
+    let deadline = wait.map(|w| tokio::time::Instant::now() + w);
+    loop {
+        let m = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, rx.recv()).await {
+                Err(_) => return Some(false),
+                Ok(m) => m,
+            },
+            None => rx.recv().await,
+        };
+        match m? {
+            ToNode::Resize(c, r) => *size = (c, r),
+            ToNode::Data(d) if d.contains(&b'\r') => return Some(true),
+            ToNode::Data(_) => {}
+        }
+    }
+}
+
+/// Write `bytes` on the screen as if the machine had sent them.
+fn feed(screen: &Arc<Mutex<Screen>>, bytes: &[u8]) {
+    let mut g = screen.lock().unwrap();
+    let Screen { term, parser, output, .. } = &mut *g;
+    parser.advance(term, bytes);
+    *output += 1;
 }
 
 /// Local echo on slow links, the way mosh does it, simplified: predictions start on a line only once the
@@ -168,63 +225,186 @@ impl TermTab {
         let term = Term::new(Config::default(), &TermSize::new(80, 24), listener);
         let screen = Arc::new(Mutex::new(Screen { term, parser: Processor::new(), state: State::Connecting, output: 0 }));
         let (s2, w2) = (screen.clone(), wake.clone());
+        let node_slot: Arc<Mutex<Option<String>>> = Arc::default();
+        let io: Arc<(AtomicU64, AtomicU64)> = Arc::default();
+        let (c2, n2, io2) = (c.clone(), node_slot.clone(), io.clone());
         let user = user.unwrap_or_else(|| "default".into());
+        // One tab, as many sessions as it takes: when the connection is lost for good (the machine restarted,
+        // was off too long), the tab waits for the machine and goes on here; after the shell ends, Enter
+        // starts a new one.
         rt.spawn(async move {
-            let fail = |e: String| {
-                s2.lock().unwrap().state = State::Failed(e);
+            let c = c2;
+            let set = |st: State| {
+                s2.lock().unwrap().state = st;
                 w2();
             };
             let (net, _, node) = match crate::console::find_node(&c, &target) {
                 Ok(x) => x,
-                Err(e) => return fail(format!("{e:#}")),
+                Err(e) => return set(State::Failed(format!("{e:#}"))),
             };
-            // The size is known after the first frame; the first resize fixes it.
-            let req = match persistent {
-                Some(name) => Req::Attach { name, user, cols: 80, rows: 24 },
-                None => Req::Shell { user, command: None, pty: Some((80, 24)), term: "xterm-256color".into() },
-            };
-            let (app, resp) = match crate::console::open_resumable(&c, &net, &node, req, Duration::from_secs(24 * 3600)).await {
-                Ok(x) => x,
-                Err(e) => return fail(format!("{e:#}")),
-            };
-            if !matches!(resp, Resp::Started) {
-                return fail("unexpected answer".into());
-            }
-            s2.lock().unwrap().state = State::Running;
-            w2();
-            let (mut recv, mut send) = tokio::io::split(app);
-            let writer = tokio::spawn(async move {
-                while let Some(m) = rx.recv().await {
-                    let r = match m {
-                        ToNode::Data(d) => sframe::write(&mut send, sframe::DATA, &d).await,
-                        ToNode::Resize(c, r) => sframe::write(&mut send, sframe::RESIZE, &sframe::resize(c, r)).await,
+            *n2.lock().unwrap() = Some(node.clone());
+            let mut size = (80u16, 24u16);
+            // Why the next session is not the first one (said on the screen when it starts).
+            let mut why: Option<String> = None;
+            loop {
+                let req = match &persistent {
+                    Some(name) => Req::Attach { name: name.clone(), user: user.clone(), cols: size.0, rows: size.1 },
+                    None => Req::Shell { user: user.clone(), command: None, pty: Some(size), term: "xterm-256color".into() },
+                };
+                let app = match crate::console::open_resumable(&c, &net, &node, req, Duration::from_secs(24 * 3600)).await {
+                    Ok((app, Resp::Started)) => app,
+                    Ok(_) => {
+                        set(State::Failed("unexpected answer from the machine".into()));
+                        if idle(&mut rx, &mut size, None).await.is_none() {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(e) if c.link(&node).is_some() => {
+                        // The machine is there and said no (an unknown user, say).
+                        set(State::Failed(format!("{e:#}")));
+                        if idle(&mut rx, &mut size, None).await.is_none() {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        set(State::Reconnecting("the machine is not reachable: waiting for it".into()));
+                        if idle(&mut rx, &mut size, Some(Duration::from_secs(3))).await.is_none() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                if let Some(w) = why.take() {
+                    let what = match &persistent {
+                        Some(n) => format!("{w}: reattached to the persistent terminal {n}"),
+                        None => format!("{w}: a new shell"),
                     };
-                    if r.is_err() {
-                        break;
-                    }
+                    feed(&s2, format!("\r\n\x1b[2m— {what} —\x1b[0m\r\n").as_bytes());
                 }
+                set(State::Running);
+                let (mut recv, mut send) = tokio::io::split(app);
+                let _ = sframe::write(&mut send, sframe::RESIZE, &sframe::resize(size.0, size.1)).await;
+                // The reader runs apart: a frame half read must never be cut by the select below.
+                let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+                let reader = tokio::spawn(async move {
+                    loop {
+                        let r = sframe::read(&mut recv).await.map_err(|_| ());
+                        let stop = r.is_err();
+                        if ev_tx.send(r).is_err() || stop {
+                            break;
+                        }
+                    }
+                });
+                let exit = loop {
+                    tokio::select! {
+                        m = rx.recv() => {
+                            let Some(m) = m else {
+                                reader.abort();
+                                return;
+                            };
+                            let r = match m {
+                                ToNode::Data(d) => {
+                                    io2.1.fetch_add(d.len() as u64, Ordering::Relaxed);
+                                    sframe::write(&mut send, sframe::DATA, &d).await
+                                }
+                                ToNode::Resize(cc, rr) => {
+                                    size = (cc, rr);
+                                    sframe::write(&mut send, sframe::RESIZE, &sframe::resize(cc, rr)).await
+                                }
+                            };
+                            if r.is_err() {
+                                break None;
+                            }
+                        }
+                        e = ev_rx.recv() => match e {
+                            Some(Ok((sframe::DATA, body))) | Some(Ok((sframe::STDERR, body))) => {
+                                io2.0.fetch_add(body.len() as u64, Ordering::Relaxed);
+                                feed(&s2, &body);
+                                w2();
+                            }
+                            Some(Ok((sframe::EXIT, body))) if body.len() >= 4 => break Some(i32::from_be_bytes(body[..4].try_into().unwrap())),
+                            Some(Ok(_)) => {}
+                            _ => break None,
+                        }
+                    }
+                };
+                reader.abort();
                 let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
-            });
-            let code = loop {
-                match sframe::read(&mut recv).await {
-                    Ok((sframe::DATA, body)) | Ok((sframe::STDERR, body)) => {
-                        let mut g = s2.lock().unwrap();
-                        let Screen { term, parser, output, .. } = &mut *g;
-                        parser.advance(term, &body);
-                        *output += 1;
-                        drop(g);
-                        w2();
+                match exit {
+                    Some(code) => {
+                        set(State::Exited(code));
+                        if idle(&mut rx, &mut size, None).await.is_none() {
+                            return;
+                        }
+                        why = Some("ended".into());
                     }
-                    Ok((sframe::EXIT, body)) if body.len() >= 4 => break i32::from_be_bytes(body[..4].try_into().unwrap()),
-                    Ok(_) => {}
-                    Err(_) => break 255,
+                    None => why = Some("connection lost".into()),
                 }
-            };
-            writer.abort();
-            s2.lock().unwrap().state = State::Exited(code);
-            w2();
+            }
         });
-        TermTab { label, screen, tx, title, size: (80, 24), id: egui::Id::unique(("term", rand_id())), scroll_rest: 0.0, focus_once: true, predict: Predict::default() }
+        TermTab {
+            label,
+            screen,
+            tx,
+            title,
+            size: (80, 24),
+            id: egui::Id::unique(("term", rand_id())),
+            scroll_rest: 0.0,
+            focus_once: true,
+            predict: Predict::default(),
+            console: c,
+            node: node_slot,
+            io,
+            sample: (std::time::Instant::now(), 0, 0, 0, 0),
+        }
+    }
+
+    /// The tab's link: its dot's colour, a short line, the details (session, path, latency, traffic).
+    pub fn status(&mut self) -> TabStatus {
+        let (rx, tx) = (self.io.0.load(Ordering::Relaxed), self.io.1.load(Ordering::Relaxed));
+        let dt = self.sample.0.elapsed().as_secs_f64();
+        if dt >= 1.0 {
+            let s = self.sample;
+            self.sample = (std::time::Instant::now(), rx, tx, (rx.saturating_sub(s.1) as f64 / dt) as u64, (tx.saturating_sub(s.2) as f64 / dt) as u64);
+        }
+        let link = self.node.lock().unwrap().clone().and_then(|n| self.console.link(&n));
+        let state = self.screen.lock().unwrap().state.clone();
+        let amber = Color32::from_rgb(230, 170, 60);
+        let (color, short) = match (&state, &link) {
+            (State::Running, Some(p)) => (
+                if p.relay { amber } else { Color32::from_rgb(60, 180, 100) },
+                format!("{} · {} ms", if p.relay { "relay" } else { "direct" }, p.rtt_ms),
+            ),
+            (State::Running, None) => (amber, "reconnecting…".to_string()),
+            (State::Connecting, _) => (amber, "connecting…".to_string()),
+            (State::Reconnecting(_), _) => (amber, "waiting for the machine".to_string()),
+            (State::Exited(code), _) => (Color32::GRAY, format!("ended ({code})")),
+            (State::Failed(_), _) => (Color32::from_rgb(220, 80, 80), "failed".to_string()),
+        };
+        let mut detail = match &state {
+            State::Reconnecting(w) | State::Failed(w) => w.clone(),
+            _ => short.clone(),
+        };
+        if let Some(p) = &link {
+            detail += &format!(
+                "\n{} {} ms{}\nthis terminal: ↓ {} ↑ {}\nthe whole connection: ↓ {} ↑ {}",
+                if p.relay { "through a relay," } else { "direct," },
+                p.rtt_ms,
+                if p.remote.is_empty() { String::new() } else { format!(", {}", p.remote) },
+                rate(self.sample.3),
+                rate(self.sample.4),
+                rate(p.rx_bps),
+                rate(p.tx_bps)
+            );
+        }
+        TabStatus { color, short, detail }
+    }
+
+    /// The traffic of this terminal now: received, sent (bytes per second).
+    pub fn traffic(&self) -> (u64, u64) {
+        (self.sample.3, self.sample.4)
     }
 
     pub fn title(&self) -> String {
@@ -235,7 +415,7 @@ impl TermTab {
     }
 
     pub fn ended(&self) -> bool {
-        matches!(self.screen.lock().unwrap().state, State::Exited(_) | State::Failed(_))
+        matches!(self.screen.lock().unwrap().state, State::Exited(_))
     }
 
     fn send(&self, d: impl Into<Vec<u8>>) {
@@ -509,8 +689,9 @@ impl TermTab {
         }
         let note = match &g.state {
             State::Connecting => Some("connecting…".to_string()),
-            State::Exited(code) => Some(format!("[ended, exit code {code}]")),
-            State::Failed(e) => Some(e.clone()),
+            State::Reconnecting(w) => Some(format!("{w}: it goes on here when it is back (Enter: try now)")),
+            State::Exited(code) => Some(format!("[ended, exit code {code}] Enter: a new shell here")),
+            State::Failed(e) => Some(format!("{e} — Enter: try again")),
             State::Running => None,
         };
         if let Some(n) = note {

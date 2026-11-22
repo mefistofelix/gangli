@@ -23,8 +23,10 @@ pub enum Tag {
     Terms(String),
     /// Network codes to show (a network was created, or its codes asked for).
     Codes,
-    /// A new API token, shown once.
+    /// A new API token: shown in a dialog.
     Token,
+    /// An API token asked for again: copy this field of the answer (`token` or `instructions`).
+    CopyField(&'static str),
     /// A launcher command line to start.
     Launch,
     /// Gateway login of a machine: copy the password.

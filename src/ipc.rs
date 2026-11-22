@@ -33,6 +33,8 @@ pub enum IpcOp {
     ApiDisable,
     ApiTokenAdd { name: String, scope: String },
     ApiTokenRemove { name: String },
+    /// A token again, with the instructions for an AI agent (local CLI / GUI only).
+    ApiTokenShow { name: String },
     TunnelList,
     TunnelAdd { name: String, node: String, target: String, listen: Option<String> },
     TunnelRemove { name: String },
@@ -74,7 +76,7 @@ impl IpcOp {
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::Stop => Some("admin"),
             IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
-            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } => None,
+            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } => None,
         }
     }
 }
