@@ -133,8 +133,8 @@ pub fn print_nodes(rows: &[NodeView]) {
         return;
     }
     println!(
-        "{:<16} {:<10} {:<8} {:<12} {:<22} {:<7} {:<16} {:>6} {:>15} {:<8} {:<13} {}",
-        "NAME", "NETWORK", "STATE", "USER", "OS", "GANGLI", "LAN IP", "RAM", "DISK FREE", "ACCESS", "LINK", "SINCE"
+        "{:<16} {:<10} {:<8} {:<12} {:<22} {:<7} {:<16} {:<16} {:>6} {:>15} {:<8} {:<13} {}",
+        "NAME", "NETWORK", "STATE", "USER", "OS", "GANGLI", "LAN IP", "WAN IP", "RAM", "DISK FREE", "ACCESS", "LINK", "SINCE"
     );
     let t = now();
     for n in rows {
@@ -149,7 +149,7 @@ pub fn print_nodes(rows: &[NodeView]) {
         let since = if n.online { n.since.unwrap_or(t) } else { n.last_seen };
         let ago = if since == 0 { "never".to_string() } else { human_ago(t.saturating_sub(since)) };
         println!(
-            "{:<16} {:<10} {:<8} {:<12} {:<22} {:<7} {:<16} {:>6} {:>15} {:<8} {:<13} {}",
+            "{:<16} {:<10} {:<8} {:<12} {:<22} {:<7} {:<16} {:<16} {:>6} {:>15} {:<8} {:<13} {}",
             truncate(&n.name, 16),
             truncate(&n.network, 10),
             if n.online { "online" } else { "offline" },
@@ -157,6 +157,7 @@ pub fn print_nodes(rows: &[NodeView]) {
             truncate(&inv.os_label(), 22),
             truncate(&inv.version, 7),
             inv.ips.first().cloned().unwrap_or_default(),
+            inv.wan(),
             if inv.mem_total > 0 { human_bytes(inv.mem_total) } else { String::new() },
             disk,
             truncate(&access, 8),

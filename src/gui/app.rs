@@ -726,7 +726,7 @@ impl App {
         let t = now();
         let mut nodes = self.nodes.clone();
         nodes.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
-        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 11 } else { 10 }).spacing([14.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 12 } else { 11 }).spacing([14.0, 8.0]).show(ui, |ui| {
             ui.label("");
             ui.label(RichText::new("Name").strong());
             ui.label(RichText::new("User").strong()).on_hover_text("Who is logged in on it now");
@@ -734,6 +734,7 @@ impl App {
             ui.label(RichText::new("System").strong());
             ui.label(RichText::new("gangli").strong()).on_hover_text("The gangli version it runs");
             ui.label(RichText::new("LAN address").strong());
+            ui.label(RichText::new("WAN address").strong()).on_hover_text("Its public address on the Internet, as the relays see it");
             ui.label(RichText::new("Link").strong());
             ui.label(RichText::new("Traffic").strong()).on_hover_text("Received and sent per second, all sessions with that machine");
             ui.label(RichText::new("Since").strong());
@@ -766,6 +767,7 @@ impl App {
                 ui.label(RichText::new(inv.version.as_str()).color(color))
                     .on_hover_text(if old { "Another version than this console's: Update in its details" } else { "Same as this console" });
                 ui.label(inv.ips.first().cloned().unwrap_or_default());
+                ui.label(inv.wan());
                 link_label(ui, n);
                 match (&n.path, n.online) {
                     (Some(p), true) => {

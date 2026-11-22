@@ -125,6 +125,17 @@ impl Inventory {
         }
     }
 
+    /// Its public (WAN) address without the port: IPv4, else IPv6; empty while not known.
+    pub fn wan(&self) -> String {
+        let strip = |a: &str| a.parse::<std::net::SocketAddr>().map(|s| s.ip().to_string()).unwrap_or_default();
+        let v4 = strip(&self.net.public_v4);
+        if v4.is_empty() {
+            strip(&self.net.public_v6)
+        } else {
+            v4
+        }
+    }
+
     /// The first user logged in, for lists ("rocar", "rocar (disconnected)").
     pub fn user_label(&self) -> String {
         match self.logged_in.len() {
@@ -354,5 +365,10 @@ mod tests {
         assert_eq!(inv.user_label(), r"WORK\anna +1");
         inv.logged_in = vec!["asuspc".into()];
         assert_eq!(inv.default_name(), "ASUSPC");
+        assert_eq!(inv.wan(), "");
+        inv.net.public_v6 = "[2a02:b023::1]:4000".into();
+        assert_eq!(inv.wan(), "2a02:b023::1");
+        inv.net.public_v4 = "151.42.197.219:63896".into();
+        assert_eq!(inv.wan(), "151.42.197.219");
     }
 }
