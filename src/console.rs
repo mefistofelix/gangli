@@ -143,10 +143,27 @@ pub struct ConsoleNet {
     pub removed: Vec<String>,
     /// This console's certificate in the network (signed with the key above).
     pub cert: Cert,
+    /// Extra iroh relays of this network, on top of the n0 ones (docs/RELAY.md): the consoles use them and
+    /// send them to the network's machines. Between consoles the latest setting (`relays_at`) wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub relays_at: u64,
     #[serde(default, rename = "console")]
     pub consoles: Vec<ConsoleRec>,
     #[serde(default, rename = "node")]
     pub nodes: Vec<NodeRec>,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+impl ConsoleNet {
+    /// What the network's machines are told: `None` while no console ever set it (they keep what they have).
+    fn relays_for_nodes(&self) -> Option<Vec<String>> {
+        (self.relays_at > 0).then(|| self.relays.clone())
+    }
 }
 
 fn path() -> std::path::PathBuf {
@@ -180,6 +197,8 @@ pub struct Console {
     saved_at: Mutex<Option<SystemTime>>,
     /// Running tunnels: name → (definition, listener task).
     tunnels: Mutex<HashMap<String, (Tunnel, tokio::task::JoinHandle<()>)>>,
+    /// Relays the networks added to this console's endpoint at runtime.
+    relays_applied: Mutex<Vec<String>>,
     /// A GUI window owns this console: another `gangli` started here asks it to come up.
     pub gui: std::sync::atomic::AtomicBool,
     pub gui_show: Notify,
@@ -259,11 +278,13 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         stop: Notify::new(),
         saved_at: Mutex::new(store::modified(&path())),
         tunnels: Mutex::default(),
+        relays_applied: Mutex::default(),
         gui: Default::default(),
         gui_show: Notify::new(),
     });
     let router = Router::builder(ep).accept(proto::ALPN, Handler { c: c.clone() }).spawn();
     let _ = c.router.set(router);
+    c.apply_relays().await;
     if let Some(listener) = listener {
         spawn_http(c.clone(), listener);
         sync_tunnels(&c);
@@ -286,8 +307,18 @@ async fn watch_file(c: Arc<Console>) {
         }
         match store::load::<ConsoleState>(&path()) {
             Ok(mut fresh) => {
+                let mut relays_changed: Vec<String> = vec![];
                 {
                     let mut st = c.state.lock().unwrap();
+                    // Relays edited by hand: a new setting, for the machines and the other consoles too.
+                    for n in fresh.networks.iter_mut() {
+                        n.relays = crate::util::relay_list(&n.relays).unwrap_or_default();
+                        let old = st.networks.iter().find(|o| o.id == n.id);
+                        if old.is_some_and(|o| o.relays != n.relays) {
+                            n.relays_at = now().max(old.map(|o| o.relays_at + 1).unwrap_or(0));
+                            relays_changed.push(n.id.clone());
+                        }
+                    }
                     for n in fresh.networks.iter_mut() {
                         for x in n.nodes.iter_mut() {
                             x.inventory = st
@@ -306,6 +337,13 @@ async fn watch_file(c: Arc<Console>) {
                 *c.saved_at.lock().unwrap() = m;
                 clog("gangli.console changed by hand: applied");
                 sync_tunnels(&c);
+                if !relays_changed.is_empty() {
+                    c.save();
+                    for net in &relays_changed {
+                        c.push_consoles(net);
+                    }
+                }
+                c.apply_relays().await;
             }
             Err(e) => {
                 // Half-written or mistyped: say it once, keep the running state.
@@ -368,9 +406,31 @@ impl Console {
         ids
     }
 
-    fn hello_for(&self, net: &str) -> Option<(Cert, Vec<String>)> {
+    fn hello_for(&self, net: &str) -> Option<(Cert, Vec<String>, Option<Vec<String>>)> {
         let st = self.state.lock().unwrap();
-        st.networks.iter().find(|n| n.id == net).map(|n| (n.cert.clone(), self.console_ids(n)))
+        st.networks.iter().find(|n| n.id == net).map(|n| (n.cert.clone(), self.console_ids(n), n.relays_for_nodes()))
+    }
+
+    /// This console's own endpoint uses the relays of all its networks, plus `[console] relays`.
+    async fn apply_relays(&self) {
+        let want: Vec<String> = {
+            let st = self.state.lock().unwrap();
+            let mut v = crate::util::relay_list(&st.console.relays).unwrap_or_default();
+            for u in st.networks.iter().flat_map(|n| n.relays.iter()) {
+                if !v.contains(u) {
+                    v.push(u.clone());
+                }
+            }
+            v
+        };
+        let mut applied = std::mem::take(&mut *self.relays_applied.lock().unwrap());
+        crate::util::apply_relays(self.endpoint(), &want, &mut applied).await;
+        *self.relays_applied.lock().unwrap() = applied;
+    }
+
+    /// The relay this console is reachable at now.
+    pub(crate) fn home_relay(&self) -> String {
+        crate::util::home_relay(self.endpoint())
     }
 
     fn key_of(&self, net: &str) -> Option<SecretKey> {
@@ -433,21 +493,38 @@ impl Console {
         self.save();
     }
 
-    /// Tell the live nodes of a network about the current console list.
+    /// Tell the live nodes of a network about the current console list and relays.
     fn push_consoles(&self, net: &str) {
-        let (ids, nodes): (Vec<String>, Vec<String>) = {
+        let (ids, relays, nodes): (Vec<String>, Option<Vec<String>>, Vec<String>) = {
             let st = self.state.lock().unwrap();
             match st.networks.iter().find(|n| n.id == net) {
-                Some(n) => (self.console_ids(n), n.nodes.iter().map(|x| x.id.clone()).collect()),
+                Some(n) => (self.console_ids(n), n.relays_for_nodes(), n.nodes.iter().map(|x| x.id.clone()).collect()),
                 None => return,
             }
         };
         let live = self.live.lock().unwrap();
         for id in nodes {
             if let Some(l) = live.get(&id) {
-                let _ = l.tx.send(Frame::Consoles { ids: ids.clone() });
+                let _ = l.tx.send(Frame::Consoles { ids: ids.clone(), relays: relays.clone() });
             }
         }
+    }
+
+    /// Set a network's extra relays (from the CLI, GUI or API): saved, sent to its live machines, used by this
+    /// console, and passed on to the network's other consoles at the next sync.
+    async fn set_relays(self: &Arc<Self>, net: &str, urls: Vec<String>) -> Result<()> {
+        {
+            let mut st = self.state.lock().unwrap();
+            let n = st.networks.iter_mut().find(|n| n.id == net).ok_or_else(|| anyhow!("unknown network"))?;
+            n.relays = urls;
+            n.relays_at = now().max(n.relays_at + 1);
+        }
+        self.save();
+        self.push_consoles(net);
+        self.apply_relays().await;
+        let (c, net) = (self.clone(), net.to_string());
+        tokio::spawn(async move { refresh_network(&c, &net, false).await });
+        Ok(())
     }
 
     /// A node knocks: an admitted node (certificate) or a new one (join secret of the public code).
@@ -506,12 +583,24 @@ impl Console {
         Ok(res)
     }
 
-    /// Merge what another console (or the directory) knows.
-    fn merge(&self, net: &str, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String>) -> bool {
+    /// Merge what another console (or the directory) knows. A newer relay setting is taken, sent to the live
+    /// machines and applied to this console's endpoint.
+    fn merge(self: &Arc<Self>, net: &str, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String>, relays: Option<proto::Relays>) -> bool {
         let mut changed = false;
+        let mut relays_changed = false;
         {
             let mut st = self.state.lock().unwrap();
             let Some(n) = st.networks.iter_mut().find(|n| n.id == net) else { return false };
+            if let Some(r) = relays {
+                if r.at > n.relays_at {
+                    if let Ok(urls) = crate::util::relay_list(&r.urls) {
+                        relays_changed = urls != n.relays;
+                        n.relays = urls;
+                        n.relays_at = r.at;
+                        changed = true;
+                    }
+                }
+            }
             for r in removed {
                 if !n.removed.contains(&r) {
                     n.removed.push(r);
@@ -563,26 +652,43 @@ impl Console {
         if changed {
             self.save();
         }
+        if relays_changed {
+            clog("relays of a network changed by another console: applied");
+            self.push_consoles(net);
+            let c = self.clone();
+            tokio::spawn(async move { c.apply_relays().await });
+        }
         changed
     }
 
-    fn sync_payload(&self, net: &str) -> Option<(Cert, Vec<NodeRec>, Vec<ConsoleRec>, Vec<String>)> {
+    #[allow(clippy::type_complexity)]
+    fn sync_payload(&self, net: &str) -> Option<(Cert, Vec<NodeRec>, Vec<ConsoleRec>, Vec<String>, Option<proto::Relays>)> {
         let st = self.state.lock().unwrap();
         let n = st.networks.iter().find(|n| n.id == net)?;
         let mut consoles = n.consoles.clone();
         if let Some(me) = consoles.iter_mut().find(|c| c.id == self.me.to_string()) {
             me.seen = now();
         }
-        Some((n.cert.clone(), n.nodes.clone(), consoles, n.removed.clone()))
+        let relays = (n.relays_at > 0).then(|| proto::Relays { urls: n.relays.clone(), at: n.relays_at });
+        Some((n.cert.clone(), n.nodes.clone(), consoles, n.removed.clone(), relays))
     }
 
-    fn sync_answer(&self, peer: &PublicKey, cert: &Cert, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String>) -> Result<Resp> {
+    #[allow(clippy::too_many_arguments)]
+    fn sync_answer(
+        self: &Arc<Self>,
+        peer: &PublicKey,
+        cert: &Cert,
+        nodes: Vec<NodeRec>,
+        consoles: Vec<ConsoleRec>,
+        removed: Vec<String>,
+        relays: Option<proto::Relays>,
+    ) -> Result<Resp> {
         let net = cert.body.network.clone();
         let key = self.key_of(&net).ok_or_else(|| anyhow!("unknown network"))?;
         cert.verify(&key.public(), peer, CertKind::Console)?;
-        self.merge(&net, nodes, consoles, removed);
-        let (_, nodes, consoles, removed) = self.sync_payload(&net).ok_or_else(|| anyhow!("unknown network"))?;
-        Ok(Resp::Synced { nodes, consoles, removed })
+        self.merge(&net, nodes, consoles, removed, relays);
+        let (_, nodes, consoles, removed, relays) = self.sync_payload(&net).ok_or_else(|| anyhow!("unknown network"))?;
+        Ok(Resp::Synced { nodes, consoles, removed, relays })
     }
 
     fn known_nodes(&self) -> Vec<(String, String, u64)> {
@@ -617,16 +723,17 @@ async fn refresh_network(c: &Arc<Console>, net: &str, publish: bool) {
         let t = now();
         let nodes = d.nodes.iter().map(|id| NodeRec { id: id.clone(), name: id[..8].to_string(), joined: t, last_seen: 0, inventory: None, cert: None }).collect();
         let consoles = d.consoles.iter().map(|id| ConsoleRec { id: id.clone(), name: String::new(), seen: 0 }).collect();
-        c.merge(net, nodes, consoles, vec![]);
+        c.merge(net, nodes, consoles, vec![], None);
         // Sync with the other consoles (both sides merge).
         let mut tasks = vec![];
         for other in d.consoles.iter().filter(|o| **o != c.me.to_string()) {
             let Ok(peer) = other.parse::<PublicKey>() else { continue };
-            let Some((cert, nodes, consoles, removed)) = c.sync_payload(net) else { continue };
+            let Some((cert, nodes, consoles, removed, relays)) = c.sync_payload(net) else { continue };
             let (c2, net2) = (c.clone(), net.to_string());
             tasks.push(tokio::spawn(async move {
-                if let Ok(Resp::Synced { nodes, consoles, removed }) = proto::call(c2.endpoint(), peer, &Req::Sync { cert, nodes, consoles, removed }).await {
-                    c2.merge(&net2, nodes, consoles, removed);
+                let req = Req::Sync { cert, nodes, consoles, removed, relays };
+                if let Ok(Resp::Synced { nodes, consoles, removed, relays }) = proto::call(c2.endpoint(), peer, &req).await {
+                    c2.merge(&net2, nodes, consoles, removed, relays);
                 }
             }));
         }
@@ -679,9 +786,9 @@ async fn directory_loop(c: Arc<Console>) {
 
 /// Open the session on `conn`: Hello / Welcome, then reader, writer and pinger tasks.
 async fn start_session(c: Arc<Console>, conn: Arc<Connection>, net: String, node: String) -> Result<()> {
-    let (cert, consoles) = c.hello_for(&net).ok_or_else(|| anyhow!("unknown network"))?;
+    let (cert, consoles, relays) = c.hello_for(&net).ok_or_else(|| anyhow!("unknown network"))?;
     let (mut send, mut recv) = conn.open_bi().await.ctx("open session")?;
-    proto::write_frame(&mut send, &Req::Hello { cert, consoles }).await?;
+    proto::write_frame(&mut send, &Req::Hello { cert, consoles, relays }).await?;
     let resp: Resp = tokio::time::timeout(Duration::from_secs(20), proto::read_frame(&mut recv))
         .await
         .map_err(|_| anyhow!("no answer to hello"))??;
@@ -816,8 +923,8 @@ async fn incoming(c: Arc<Console>, conn: Arc<Connection>) {
             }
             Err(e) => Resp::Error { message: format!("{e:#}") },
         },
-        Req::Sync { cert, nodes, consoles, removed } => {
-            c.sync_answer(&peer, &cert, nodes, consoles, removed).unwrap_or_else(|e| Resp::Error { message: format!("{e:#}") })
+        Req::Sync { cert, nodes, consoles, removed, relays } => {
+            c.sync_answer(&peer, &cert, nodes, consoles, removed, relays).unwrap_or_else(|e| Resp::Error { message: format!("{e:#}") })
         }
         _ => Resp::Error { message: "not allowed".into() },
     };
@@ -1052,6 +1159,7 @@ fn api_help(c: &Console) -> Value {
             op("network_add", "admin", json!({ "code": "private code", "name": "optional" }), "add a network owned elsewhere"),
             op("network_codes", "admin", json!({ "name": "network" }), "a network's codes"),
             op("network_remove", "admin", json!({ "name": "network" }), "remove a network from this console"),
+            op("network_relays", "read / admin with set", json!({ "name": "network", "set": "optional list of https:// relay URLs ([] clears)" }), "a network's extra iroh relays (on top of the n0 ones), sent to its machines"),
             op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
             op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "folder with the release binaries" }), "send machines a new gangli"),
             op("stop", "admin", json!({}), "close this console"),
@@ -1144,6 +1252,8 @@ fn add_network(c: &Console, key: SecretKey, name: Option<String>) -> Result<Stri
         nodes: vec![],
         consoles: vec![ConsoleRec { id: me, name: host, seen: now() }],
         removed: vec![],
+        relays: vec![],
+        relays_at: 0,
     });
     Ok(name)
 }
@@ -1171,10 +1281,31 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                         "nodes": n.nodes.iter().filter(|x| !n.removed.contains(&x.id)).count(),
                         "online": n.nodes.iter().filter(|x| live.contains_key(&x.id)).count(),
                         "consoles": n.consoles.len(),
+                        "relays": n.relays,
                     })
                 })
                 .collect();
-            Ok(json!({ "version": crate::build_version(), "console_id": c.me.to_string(), "open": c.open, "networks": nets }))
+            Ok(json!({
+                "version": crate::build_version(),
+                "console_id": c.me.to_string(),
+                "open": c.open,
+                "relay": c.home_relay(),
+                "networks": nets,
+            }))
+        }
+        IpcOp::NetworkRelays { name, set } => {
+            let net = {
+                let st = c.state.lock().unwrap();
+                st.networks.iter().find(|n| n.name == name).map(|n| n.id.clone()).ok_or_else(|| anyhow!("no network {name} here"))?
+            };
+            if let Some(urls) = set {
+                let urls = crate::util::relay_list(&urls)?;
+                c.set_relays(&net, urls).await?;
+                clog(&format!("relays of {name} set"));
+            }
+            let st = c.state.lock().unwrap();
+            let n = st.networks.iter().find(|n| n.id == net).ok_or_else(|| anyhow!("no network {name} here"))?;
+            Ok(json!({ "network": n.name, "relays": n.relays, "n0_relays": true, "console_relay": c.home_relay() }))
         }
         IpcOp::NetworkCreate { name } => {
             let key = SecretKey::generate();

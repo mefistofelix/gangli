@@ -74,6 +74,9 @@ pub struct Membership {
     /// Consoles this node knocks on when it comes online.
     #[serde(default)]
     pub consoles: Vec<String>,
+    /// Extra iroh relays the network's consoles sent (used on top of the n0 ones and `[node] relays`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     /// This node's certificate, signed by the network key.

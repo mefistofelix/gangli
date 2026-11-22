@@ -37,7 +37,11 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
   {"op": "exec", "node": "nas", "user": "system", "command": "systemctl restart smbd"}
   {"op": "tunnel_add", "name": "nas-web", "node": "nas", "target": "192.168.1.10:80", "listen": "8080"}
   {"op": "ssh_login_add", "hosts": ["*"], "users": ["*"], "key": "ssh-ed25519 AAAA… agent"}
+  {"op": "network_relays", "name": "family", "set": ["https://relay.example.org"]}
   ```
+
+  `network_relays` without `set` shows a network's extra relays (read scope); with `set` it replaces them
+  (`[]`: the n0 relays only) and sends them to the network's machines (admin scope).
 
 - `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`: shortcuts for `status`, `nodes`, `info`.
 

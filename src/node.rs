@@ -118,8 +118,24 @@ impl ProtocolHandler for NodeHandler {
     }
 }
 
+/// The node's home relay, kept current by the main loop (the inventory reports it).
+static HOME_RELAY: Mutex<String> = Mutex::new(String::new());
+
 async fn collect() -> Inventory {
-    tokio::task::spawn_blocking(inventory::collect).await.unwrap_or_default()
+    let mut inv = tokio::task::spawn_blocking(inventory::collect).await.unwrap_or_default();
+    inv.relay = HOME_RELAY.lock().unwrap().clone();
+    inv
+}
+
+/// Extra relays the node's networks asked for (each membership keeps its own list).
+fn wanted_relays(st: &state::State) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for u in st.networks.iter().flat_map(|m| m.relays.iter()) {
+        if !v.contains(u) {
+            v.push(u.clone());
+        }
+    }
+    v
 }
 
 async fn run(stop: Arc<AtomicBool>) -> Result<()> {
@@ -144,6 +160,8 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
     let mut last_ips: Vec<String> = vec![];
     let mut inv = Inventory::default();
     let mut first = true;
+    let mut relays_applied: Vec<String> = vec![];
+    let mut relays_wanted: Vec<String> = vec![];
 
     while !stop.load(Ordering::SeqCst) {
         let st = match state::load() {
@@ -154,6 +172,15 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
                 continue;
             }
         };
+
+        // Relays the consoles of its networks sent: on top of the n0 ones and the local configuration.
+        let want = wanted_relays(&st);
+        if want != relays_wanted {
+            crate::util::apply_relays(router.endpoint(), &want, &mut relays_applied).await;
+            log_line(&format!("extra relays: {}", if want.is_empty() { "none".to_string() } else { want.join(", ") }));
+            relays_wanted = want;
+        }
+        *HOME_RELAY.lock().unwrap() = crate::util::home_relay(router.endpoint());
 
         // Local inventory check: no network traffic unless something changed.
         if last_check.is_none_or(|t| t.elapsed() >= LOCAL_CHECK) {
@@ -365,6 +392,7 @@ fn admit(id: &str, a: proto::Admission, console: &PublicKey) -> Result<()> {
             cert: Some(a.cert.clone()),
             node_name: Some(a.node_name.clone()),
             consoles,
+            relays: m.relays.clone(),
             last_error: None,
             joined: now(),
         };
@@ -388,17 +416,24 @@ fn check_console(peer: &PublicKey, cert: &Cert) -> Result<(String, String)> {
     Ok((cert.body.network.clone(), m.node_name.clone().unwrap_or_default()))
 }
 
-/// Remember the consoles to knock on (the list comes from an authenticated console).
-fn remember_consoles(net: &str, peer: &PublicKey, mut ids: Vec<String>) {
+/// Remember the consoles to knock on and, when sent, the network's extra relays (both come from an
+/// authenticated console; a bad relay list is ignored).
+fn remember_consoles(net: &str, peer: &PublicKey, mut ids: Vec<String>, relays: Option<Vec<String>>) {
     if !ids.contains(&peer.to_string()) {
         ids.insert(0, peer.to_string());
     }
     ids.dedup();
+    let relays = relays.and_then(|r| crate::util::relay_list(&r).ok());
     let net = net.to_string();
     let _ = state::update(|st| {
         if let Some(m) = st.networks.iter_mut().find(|m| m.id == net) {
             if m.consoles != ids {
                 m.consoles = ids;
+            }
+            if let Some(r) = relays {
+                if m.relays != r {
+                    m.relays = r;
+                }
             }
         }
         Ok(())
@@ -426,9 +461,9 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
             Err(_) => break,
         };
         match req {
-            Req::Hello { cert, consoles } => match check_console(&peer, &cert) {
+            Req::Hello { cert, consoles, relays } => match check_console(&peer, &cert) {
                 Ok((net, node_name)) => {
-                    remember_consoles(&net, &peer, consoles);
+                    remember_consoles(&net, &peer, consoles, relays);
                     let inventory = collect().await;
                     if proto::write_frame(&mut send, &Resp::Welcome { node_name: node_name.clone(), inventory }).await.is_err() {
                         break;
@@ -581,7 +616,7 @@ async fn session<W, R>(
             Ok(Ok(Frame::Ping)) => {
                 let _ = tx.send(Frame::Pong);
             }
-            Ok(Ok(Frame::Consoles { ids })) => remember_consoles(&net, &peer, ids),
+            Ok(Ok(Frame::Consoles { ids, relays })) => remember_consoles(&net, &peer, ids, relays),
             Ok(Ok(_)) => {}
             _ => break,
         }

@@ -30,6 +30,9 @@ pub struct Inventory {
     /// Seconds.
     pub uptime: u64,
     pub version: String,
+    /// The iroh relay the node is reachable at (its home relay), empty if none yet.
+    #[serde(default)]
+    pub relay: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -46,7 +49,8 @@ impl Inventory {
         let disks: Vec<(&str, u64)> = self.disks.iter().map(|d| (d.mount.as_str(), d.total)).collect();
         serde_json::json!([
             self.hostname, self.os, self.os_version, self.kernel, self.arch, self.cpus, self.cpu,
-            self.mem_total, disks, self.ips, self.users, self.service_user, self.full_access, self.version
+            self.mem_total, disks, self.ips, self.users, self.service_user, self.full_access, self.version,
+            self.relay
         ])
         .to_string()
     }

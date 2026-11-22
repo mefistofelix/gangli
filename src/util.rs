@@ -112,11 +112,74 @@ mod tests {
     }
 
     #[test]
+    fn relay_lists() {
+        let l = relay_list(&["https://relay.example.org".into(), " https://relay.example.org/ ".into(), "".into()]).unwrap();
+        assert_eq!(l, vec!["https://relay.example.org/".to_string()]);
+        assert!(relay_url("not a url").is_err());
+        assert!(relay_url("ftp://relay.example.org").is_err());
+    }
+
+    #[test]
     fn constant_time_eq() {
         assert!(eq_ct("abc", "abc"));
         assert!(!eq_ct("abc", "abd"));
         assert!(!eq_ct("abc", "ab"));
     }
+}
+
+/// A relay address as gangli keeps it (iroh's normal form), or why it is not one.
+pub fn relay_url(u: &str) -> anyhow::Result<String> {
+    let url: iroh::RelayUrl = u.trim().parse().map_err(|e| anyhow::anyhow!("relay {u}: {e}"))?;
+    let s = url.to_string();
+    if !s.starts_with("https://") && !s.starts_with("http://") {
+        anyhow::bail!("relay {u}: an https:// address, e.g. https://relay.example.org");
+    }
+    Ok(s)
+}
+
+/// Normal form of a relay list: valid, no duplicates, order kept.
+pub fn relay_list(urls: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = vec![];
+    for u in urls.iter().filter(|u| !u.trim().is_empty()) {
+        let u = relay_url(u)?;
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    Ok(out)
+}
+
+/// Bring an endpoint's relays pushed by the networks to `want`, at runtime: they come on top of the relays it
+/// started with (the n0 ones and the local configuration), which are never removed. `applied`: what earlier
+/// calls added.
+pub async fn apply_relays(ep: &iroh::Endpoint, want: &[String], applied: &mut Vec<String>) {
+    for u in want {
+        if applied.contains(u) {
+            continue;
+        }
+        let Ok(url) = u.parse::<iroh::RelayUrl>() else { continue };
+        if ep.relay_map().contains(&url) {
+            continue;
+        }
+        ep.insert_relay(url.clone(), std::sync::Arc::new(iroh::RelayConfig::from(url))).await;
+        applied.push(u.clone());
+    }
+    for u in applied.clone() {
+        if !want.contains(&u) {
+            if let Ok(url) = u.parse::<iroh::RelayUrl>() {
+                ep.remove_relay(&url).await;
+            }
+            applied.retain(|x| *x != u);
+        }
+    }
+}
+
+/// The relay this endpoint is reachable at now (its home relay), empty if none yet.
+#[allow(unused_mut)]
+pub fn home_relay(ep: &iroh::Endpoint) -> String {
+    use iroh::Watcher;
+    let mut w = ep.home_relay_status();
+    w.get().first().map(|s| s.url().to_string()).unwrap_or_default()
 }
 
 /// Relays from the configuration (section 4 of docs/ARCHITECTURE.md, docs/RELAY.md): `None` keeps the

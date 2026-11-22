@@ -80,6 +80,14 @@ pub struct JobInfo {
     pub output: u64,
 }
 
+/// A network's extra iroh relays (docs/RELAY.md), on top of the n0 ones. Set on a console; between consoles
+/// the most recent setting wins (`at`, unix seconds; 0: never set).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Relays {
+    pub urls: Vec<String>,
+    pub at: u64,
+}
+
 /// What a new node gets back when its join secret is accepted.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Admission {
@@ -101,8 +109,21 @@ pub enum Req {
         join: Option<String>,
         inventory: Inventory,
     },
-    Sync { cert: Cert, nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String> },
-    Hello { cert: Cert, consoles: Vec<String> },
+    Sync {
+        cert: Cert,
+        nodes: Vec<NodeRec>,
+        consoles: Vec<ConsoleRec>,
+        removed: Vec<String>,
+        #[serde(default)]
+        relays: Option<Relays>,
+    },
+    /// `relays`: the network's extra relays, when the console knows them (older nodes ignore the field).
+    Hello {
+        cert: Cert,
+        consoles: Vec<String>,
+        #[serde(default)]
+        relays: Option<Vec<String>>,
+    },
     Info,
     /// Console → node: connect to `target` (the machine's LAN or localhost); after `Forwarding` the stream
     /// carries the raw bytes both ways.
@@ -142,7 +163,13 @@ pub enum Resp {
         #[serde(default)]
         admission: Option<Admission>,
     },
-    Synced { nodes: Vec<NodeRec>, consoles: Vec<ConsoleRec>, removed: Vec<String> },
+    Synced {
+        nodes: Vec<NodeRec>,
+        consoles: Vec<ConsoleRec>,
+        removed: Vec<String>,
+        #[serde(default)]
+        relays: Option<Relays>,
+    },
     Welcome { node_name: String, inventory: Inventory },
     Info { node_name: String, inventory: Inventory },
     Forwarding,
@@ -164,8 +191,13 @@ pub enum Frame {
     Pong,
     /// Node → console, only when the stable part of the inventory changed.
     Inventory { inventory: Inventory },
-    /// Console → node: the consoles the node may knock on.
-    Consoles { ids: Vec<String> },
+    /// Console → node: the consoles the node may knock on and, when known, the network's extra relays. New
+    /// settings ride on this frame as optional fields: a node that does not know a frame drops the session.
+    Consoles {
+        ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relays: Option<Vec<String>>,
+    },
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(w: &mut W, v: &T) -> Result<()> {

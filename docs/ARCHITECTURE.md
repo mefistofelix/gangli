@@ -100,9 +100,28 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
   owner machine), configured with `RelayMode::Custom`, n0 kept as fallback. Paid n0 shared relays are the
   alternative.
   Options researched for later, free ones included: [RELAY.md](RELAY.md).
-- Own relays are a setting of each file: `relays = ["https://relay.example.org"]` in `[node]` of `gangli.node`
-  and in `[console]` of `gangli.console`, `relays_n0_fallback = true` (default) to keep the n0 ones as well;
-  applied when the node / console starts.
+- **Extra relays per network, set on a console, sent to the machines [decided 2026-11-22]**. The n0 relays
+  stay the default and are always kept; a network may add its own (`relays` in its `[[network]]` of
+  `gangli.console`; GUI *Networks → Relays*, `gangli network relays NAME URL…`, API `network_relays`).
+  - Relays know nothing of networks: they forward end-to-end encrypted packets between endpoint ids, and
+    gangli's checks (certificates, join secret) happen between console and node. Each endpoint has a list,
+    picks the closest as its home relay and publishes it in its address record; whoever dials it goes to that
+    relay even when it is not in its own list (iroh 1.5 connects to any relay URL a peer's address names; its
+    own list only chooses the home relay and carries an optional access token). So a console on the n0 relays
+    reaches a node homed on ours, and the list does **not** belong in the network codes: codes are printed,
+    embedded and kept in the phone wallet, and would all go stale when a relay changes.
+  - The console sends the list to the network's machines over the authenticated session (`Hello`, then the
+    `Consoles` frame when it changes; optional fields, so older nodes ignore them); each node keeps it per
+    membership in `gangli.node` and uses the union of its networks' lists, added at runtime
+    (`Endpoint::insert_relay`) on top of the n0 ones: a console can add relays, never take the n0 ones away.
+  - Consoles of a network: the most recent setting wins (`relays_at`), carried by `Sync`. A console uses the
+    relays of all its networks.
+  - Each node reports its home relay in its inventory (machine details: *Its relay*); the console shows its
+    own (`status` → `relay`).
+  - Local setting as well, per file: `relays = […]` in `[node]` / `[console]`, `relays_n0_fallback = true`
+    (default; `false` drops the n0 ones on that machine only), applied when the node / console starts.
+  - Our relay is open to anyone, like n0's **[decided 2026-11-22]**. Closing it would need an access token on
+    every machine that talks through it (dialers included), sent by the consoles the same way.
 - Dialing by id alone works through n0 address lookup: verified on 2026-11-20 (join 3 s, list and direct
   query ≈ 1.4 s including endpoint start, direct path 7 ms on a LAN).
 - ALPN `gangli/2`: length-prefixed JSON frames; resumable streams and terminals get their own ALPNs.
@@ -394,7 +413,7 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     OpenSSH, WinSCP…), as a chosen user and optionally in a persistent terminal; copy the gateway password or an `ssh` command line, its persistent
     terminals (open / close), its tunnels (add), inventory, update from a release folder, forget;
   - *Networks*: create (dialog with the network's QR for the phone wallet, the public code, and the private
-    one hidden until asked), codes, add one with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
+    one hidden until asked), codes, relays (extra ones, sent to its machines; the console's own relay shown), add one with a private code, remove; "prepare a gangli" writes a copy of this binary with the public code
     embedded next to it, for a relative;
   - *Tunnels*: list with on / off and state, add, remove;
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;

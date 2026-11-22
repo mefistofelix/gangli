@@ -75,6 +75,32 @@ pub fn network_remove(name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn network_relays(name: &str, urls: Vec<String>, clear: bool, json: bool) -> Result<()> {
+    let set = if clear { Some(vec![]) } else if urls.is_empty() { None } else { Some(urls) };
+    let changed = set.is_some();
+    let v = ipc::call(IpcOp::NetworkRelays { name: name.to_string(), set })?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    let list: Vec<&str> = v["relays"].as_array().map(|a| a.iter().filter_map(|u| u.as_str()).collect()).unwrap_or_default();
+    if list.is_empty() {
+        println!("{name}: the public n0 relays only");
+    } else {
+        println!("{name}: the public n0 relays, and");
+        for u in &list {
+            println!("  {u}");
+        }
+    }
+    if changed {
+        println!("sent to its online machines (the others get it when they come back)");
+    }
+    if let Some(r) = v["console_relay"].as_str().filter(|r| !r.is_empty()) {
+        println!("this console is reachable at {r}");
+    }
+    Ok(())
+}
+
 pub fn nodes(network: Option<String>, json: bool) -> Result<()> {
     let v = ipc::call(IpcOp::Nodes { network })?;
     if json {

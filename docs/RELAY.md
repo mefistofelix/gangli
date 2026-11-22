@@ -1,8 +1,10 @@
 # Own iroh relay
 
 gangli uses the **public n0 relays** by default **[decided 2026-11-20]**. The iroh docs advise against them in
-production: they are shared, rate limited and without guarantees. gangli takes a relay list in its config
-next to the binary (`relays`, `relays_n0_fallback`: `RelayMode::Custom`, ours first, n0 as fallback).
+production: they are shared, rate limited and without guarantees. A network can add its own on top of them:
+on a console, *Networks → Relays* (or `gangli network relays NAME https://…`); the console sends them to the
+network's machines (section 4 of [ARCHITECTURE.md](ARCHITECTURE.md)). There is also a local setting per file
+(`relays`, `relays_n0_fallback` in `[node]` / `[console]`).
 
 **Our relay [set up 2026-11-22]**: an Oracle Cloud Always Free VM (Ampere A1, 2 OCPU, 12 GB, Ubuntu), set up
 by [`scripts/relay/setup.sh`](../scripts/relay/setup.sh); details in *What runs on the relay VM* below. Its

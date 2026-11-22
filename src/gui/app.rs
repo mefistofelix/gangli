@@ -42,6 +42,13 @@ enum Modal {
     /// Joining from a phone: the QR shown, the answer when it comes (the public code), and a stop flag.
     Pair { url: String, answer: Arc<Mutex<Option<Result<String, String>>>>, cancel: Arc<AtomicBool> },
     Confirm { text: String, op: IpcOp, done: String },
+    /// A network's extra relays, one address per line.
+    Relays { network: String, text: String },
+}
+
+/// `https://relay.example.org/` → `relay.example.org`.
+fn relay_host(u: &str) -> String {
+    u.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string()
 }
 
 struct Toast {
@@ -772,6 +779,9 @@ impl App {
             if let Some(p) = &n.path {
                 row("Peer address", p.remote.clone());
             }
+            if !inv.relay.is_empty() {
+                row("Its relay", relay_host(&inv.relay));
+            }
         });
 
         // Update, forget.
@@ -819,10 +829,15 @@ impl App {
     fn networks(&mut self, ui: &mut Ui) {
         ui.heading("Networks");
         ui.label(RichText::new("A network is a key. Its public code makes a machine a node; its private code makes a console an owner: keep it for yourself.").weak());
+        let relay = s(&self.status["relay"]).to_string();
+        if !relay.is_empty() {
+            ui.label(RichText::new(format!("This console is reachable through the relay {}", relay_host(&relay))).weak());
+        }
         ui.add_space(8.0);
         let nets = self.status["networks"].as_array().cloned().unwrap_or_default();
         for n in &nets {
             let name = s(&n["name"]).to_string();
+            let relays: Vec<String> = n["relays"].as_array().map(|a| a.iter().map(|u| s(u).to_string()).collect()).unwrap_or_default();
             egui::Frame::group(ui.style()).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -839,8 +854,13 @@ impl App {
                         if ui.button("Codes").clicked() {
                             self.call(Tag::Codes, IpcOp::NetworkCodes { name: name.clone() });
                         }
+                        if ui.button("Relays").on_hover_text("Extra iroh relays for this network, on top of the public n0 ones").clicked() {
+                            self.modal = Some(Modal::Relays { network: name.clone(), text: relays.join("\n") });
+                        }
                     });
                 });
+                let extra = if relays.is_empty() { String::new() } else { format!(" + {}", relays.iter().map(|u| relay_host(u)).collect::<Vec<_>>().join(", ")) };
+                ui.label(RichText::new(format!("Relays: n0 (public){extra}")).weak());
             });
             ui.add_space(4.0);
         }
@@ -1375,6 +1395,17 @@ impl App {
                 Modal::Confirm { text, .. } => {
                     ui.label(text.as_str());
                 }
+                Modal::Relays { network, text } => {
+                    ui.heading(format!("Relays of {network}"));
+                    ui.label(RichText::new(
+                        "When two machines cannot reach each other directly, their traffic goes through a relay (end-to-end \
+                         encrypted: the relay cannot read it). The public n0 relays are always used; add your own here, one \
+                         address per line. This console uses them, sends them to the network's machines and to its other \
+                         consoles.",
+                    ).weak());
+                    ui.add_space(6.0);
+                    ui.add(egui::TextEdit::multiline(text).hint_text("https://relay.example.org").desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+                }
                 Modal::Pair { url, .. } => {
                     ui.heading("Join a network from your phone");
                     ui.add_space(6.0);
@@ -1400,6 +1431,21 @@ impl App {
                     if ui.button(RichText::new("Yes").color(RED)).clicked() {
                         self.call(Tag::Done(done.clone()), op.clone());
                         keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Relays { network, text } = &m {
+                    if ui.button(RichText::new("Save").strong()).clicked() {
+                        let urls: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                        let bad: Vec<&String> = urls.iter().filter(|u| crate::util::relay_url(u).is_err()).collect();
+                        if let Some(b) = bad.first() {
+                            self.toast(format!("{b}: not a relay address (https://…)"), true);
+                        } else {
+                            let done = format!("Relays of {network} saved and sent to its machines");
+                            self.call(Tag::Done(done), IpcOp::NetworkRelays { name: network.clone(), set: Some(urls) });
+                            keep = false;
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         keep = false;

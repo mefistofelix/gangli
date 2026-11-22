@@ -21,6 +21,9 @@ pub enum IpcOp {
     NetworkAdd { code: String, name: Option<String> },
     NetworkCodes { name: String },
     NetworkRemove { name: String },
+    /// A network's extra relays (on top of the n0 ones): shown, or replaced with `set` (an empty list clears
+    /// them); sent to its machines.
+    NetworkRelays { name: String, #[serde(default)] set: Option<Vec<String>> },
     Nodes { network: Option<String> },
     Info { node: String },
     Forget { node: String },
@@ -58,6 +61,8 @@ impl IpcOp {
     pub fn scope(&self) -> Option<&'static str> {
         match self {
             IpcOp::Status | IpcOp::Nodes { .. } | IpcOp::Info { .. } => Some("read"),
+            IpcOp::NetworkRelays { set: None, .. } => Some("read"),
+            IpcOp::NetworkRelays { .. } => Some("admin"),
             IpcOp::NetworkCreate { .. } | IpcOp::NetworkAdd { .. } | IpcOp::NetworkCodes { .. } | IpcOp::NetworkRemove { .. } | IpcOp::Forget { .. } => Some("admin"),
             IpcOp::TunnelList => Some("read"),
             IpcOp::TermList { .. } | IpcOp::TermKill { .. } => Some("exec"),

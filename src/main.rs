@@ -207,6 +207,15 @@ enum NetworkCmd {
     },
     /// Remove a network from this console only.
     Remove { name: String },
+    /// Show or set a network's extra iroh relays (on top of the public n0 ones); its machines get them.
+    Relays {
+        name: String,
+        /// The new list (replaces the old one), e.g. https://relay.example.org
+        urls: Vec<String>,
+        /// Remove all extra relays (back to the n0 ones only).
+        #[arg(long, conflicts_with = "urls")]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -426,6 +435,7 @@ fn main() {
         Some(Command::Network(NetworkCmd::Add { code, name })) => console_cmd::network_add(&code, name, json),
         Some(Command::Network(NetworkCmd::Codes { name, qr })) => console_cmd::network_codes(&name, qr, json),
         Some(Command::Network(NetworkCmd::Remove { name })) => console_cmd::network_remove(&name, json),
+        Some(Command::Network(NetworkCmd::Relays { name, urls, clear })) => console_cmd::network_relays(&name, urls, clear, json),
         Some(Command::Nodes { network }) => console_cmd::nodes(network, json),
         Some(Command::Info { node }) => console_cmd::info(&node, json),
         Some(Command::Forget { node }) => console_cmd::forget(&node, json),
