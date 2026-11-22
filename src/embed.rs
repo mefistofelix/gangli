@@ -4,6 +4,10 @@
 //! networks: public code, name, extra relays. A `gangli.networks` file with the same JSON next to the binary
 //! works too (needed on macOS, where changing the file breaks its signature until it is signed again).
 //! Only public codes: a private one is refused when packing and when reading.
+//!
+//! They are used once: at the first start where there is no `gangli.node` yet, it is made with them
+//! (`state::seed_from_bundle`). After that the binary is like any other (networks left stay left); deleting
+//! `gangli.node` makes the next start put them back.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -115,19 +119,6 @@ pub fn pack(from: &Path, out: &Path, bundle: &Bundle) -> Result<()> {
         let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755));
     }
     Ok(())
-}
-
-/// The carried networks this machine is not in yet.
-pub fn not_joined() -> Vec<BundledNet> {
-    let Some(b) = bundled() else { return vec![] };
-    let have: Vec<String> = crate::state::load().map(|s| s.networks.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
-    b.networks
-        .into_iter()
-        .filter(|n| match crate::code::decode(&n.code) {
-            Ok(crate::code::Code::Public { network, .. }) => !have.contains(&network.to_string()),
-            _ => false,
-        })
-        .collect()
 }
 
 /// True for a Mach-O file (macOS): packing it needs a new ad-hoc signature.

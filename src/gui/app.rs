@@ -43,8 +43,6 @@ enum Modal {
     Pair { url: String, answer: Arc<Mutex<Option<Result<Vec<crate::pair::Offer>, String>>>>, cancel: Arc<AtomicBool> },
     /// The phone sent these networks: the person at this computer confirms (and may untick some).
     PairConfirm { offers: Vec<(crate::pair::Offer, bool)> },
-    /// This binary carries networks this computer is not in yet: join them?
-    Carried { nets: Vec<(crate::embed::BundledNet, bool)> },
     /// Make a gangli executable carrying the ticked networks.
     MakeExe { picks: Vec<(String, bool)> },
     Confirm { text: String, op: IpcOp, done: String },
@@ -285,15 +283,11 @@ impl App {
         if !app.node.installed && !app.node.networks.is_empty() && crate::state::load().is_ok_and(|s| s.node.window_node) {
             app.start_window_node();
         }
-        // A binary made for a relative (it carries networks), or a computer with no network yet: start on
-        // "This computer", asking to join what the binary carries.
-        let carried = crate::embed::not_joined();
+        // A binary made for a relative (it carried networks into gangli.node at its first start), or a computer
+        // with no network yet: start on "This computer".
         let consoles_networks = crate::console::load_state().map(|s| s.networks.len()).unwrap_or(0);
-        if consoles_networks == 0 && (!carried.is_empty() || !app.node.networks.is_empty() || app.node.installed) {
+        if consoles_networks == 0 && (crate::embed::bundled().is_some() || !app.node.networks.is_empty() || app.node.installed) {
             app.page = Page::Computer;
-        }
-        if !carried.is_empty() {
-            app.modal = Some(Modal::Carried { nets: carried.into_iter().map(|n| (n, true)).collect() });
         }
         // For screenshots in tests.
         app.page = match std::env::var("GANGLI_GUI_PAGE").unwrap_or_default().as_str() {
@@ -1799,20 +1793,9 @@ impl App {
                     ui.add_space(6.0);
                     ui.add(egui::TextEdit::multiline(text).hint_text("https://relay.example.org").desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 }
-                Modal::Carried { nets } => {
-                    ui.heading("This gangli carries networks");
-                    ui.label("Join this computer to:");
-                    ui.add_space(4.0);
-                    for (n, on) in nets.iter_mut() {
-                        let label = if n.name.is_empty() { format!("network {}", &n.code[..8]) } else { n.name.clone() };
-                        ui.checkbox(on, RichText::new(label).strong());
-                    }
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("The node then runs and a console of each network admits this computer. Only join networks you expect.").weak());
-                }
                 Modal::MakeExe { picks } => {
                     ui.heading("Create a gangli executable");
-                    ui.label("A copy of this gangli that carries the ticked networks (public codes and relays): whoever runs it is asked to join them, and the machine becomes a node.");
+                    ui.label("A copy of this gangli with the ticked networks inside (public codes and relays): the first time it runs on a computer without a gangli.node, that computer starts as a node of those networks.");
                     ui.add_space(4.0);
                     for (name, on) in picks.iter_mut() {
                         ui.checkbox(on, RichText::new(name.as_str()).strong());
@@ -1941,15 +1924,6 @@ impl App {
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {
-                        keep = false;
-                    }
-                } else if let Modal::Carried { nets } = &m {
-                    let picked: Vec<(String, Vec<String>)> = nets.iter().filter(|(_, on)| *on).map(|(n, _)| (n.code.clone(), n.relays.clone())).collect();
-                    if ui.add_enabled(!picked.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
-                        self.join_codes(picked);
-                        keep = false;
-                    }
-                    if ui.button("Not now").clicked() {
                         keep = false;
                     }
                 } else if let Modal::MakeExe { picks } = &m {

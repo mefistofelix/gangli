@@ -49,12 +49,9 @@ pub(crate) fn prepare_install(o: &InstallOpts) -> io::Result<PathBuf> {
     })
     .map_err(|e| other(format!("{e:#}")))?;
     crate::state::node_key().map_err(|e| other(format!("{e:#}")))?;
-    match &o.code {
-        Some(c) => crate::state::add_join(c).map(|_| ()),
-        // The networks this binary carries, with their relays.
-        None => crate::state::join_bundled().map(|_| ()),
+    if let Some(c) = &o.code {
+        crate::state::add_join(c).map_err(|e| other(format!("{e:#}")))?;
     }
-    .map_err(|e| other(format!("{e:#}")))?;
     protect_node_file(o.user.as_deref())?;
     Ok(exe)
 }

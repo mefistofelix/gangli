@@ -371,9 +371,10 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   relays), or a `gangli.networks` file with the same JSON next to the binary. Only public codes (refused
   otherwise, when packing and when reading). Made by *Networks → Create gangli executable…* (tick the
   networks; a copy of this binary next to it) or `gangli pack --network NAME… [--code CODE…] [--from
-  <release binary of another OS>] --out <file>`. Run by a relative: the window asks "This gangli carries
-  networks: join?" (ticked), then joins them with their relays and runs the node; `gangli node` and
-  `gangli install` without `--code` join them too.
+  <release binary of another OS>] --out <file>`. **Used once [decided 2026-11-22]**: the first time it
+  starts (any command, the window too) where there is no `gangli.node` yet, `gangli.node` is made with those
+  networks and their relays, no question asked; then it is a normal gangli (the window runs the node since
+  there are networks; networks left stay left). Deleting `gangli.node` makes the next start put them back.
   - Windows: appended data to an unsigned PE is fine.
   - macOS arm64 needs a valid (ad-hoc) signature: `pack` re-signs ad hoc in-process (`apple-codesign`)
     **[verify early]**; fallback: code in a file next to the binary.

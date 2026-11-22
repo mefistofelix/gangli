@@ -66,7 +66,7 @@ enum Command {
         #[arg(long)]
         hidden: bool,
     },
-    /// node: run the node now as this user, no install (joins the networks the binary carries, if any).
+    /// node: run the node now as this user, no install.
     Node {
         /// Public network code.
         #[arg(long)]
@@ -74,7 +74,7 @@ enum Command {
     },
     /// node: install the node as a system service, started at boot, full access (one elevation prompt).
     Install {
-        /// Public network code; default: the networks the binary carries, if any.
+        /// Public network code to join first.
         #[arg(long)]
         code: Option<String>,
         /// Run the service as this account instead of SYSTEM / root (sessions only as that user).
@@ -414,6 +414,10 @@ fn main() {
 
     let cli = Cli::parse_from(args);
     let json = cli.json;
+    // A binary that carries networks, started where there is no gangli.node yet: it starts with them.
+    if let Err(e) = state::seed_from_bundle() {
+        eprintln!("gangli: the networks this binary carries were not set up: {e:#}");
+    }
     let result: anyhow::Result<()> = match cli.command {
         None if gui::started_from_desktop() => gui::run(false),
         Some(Command::Gui { hidden }) => gui::run(hidden),

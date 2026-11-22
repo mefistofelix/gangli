@@ -188,9 +188,18 @@ pub fn add_join_with(code_str: &str, relays: &[String]) -> Result<String> {
     Ok(name)
 }
 
-/// Join the networks this binary carries (embed.rs) that this machine is not in yet. Returns their names.
-pub fn join_bundled() -> Result<Vec<String>> {
-    crate::embed::not_joined().iter().map(|n| add_join_with(&n.code, &n.relays)).collect()
+/// First start of a binary that carries networks (embed.rs): when there is no `gangli.node` yet, it is made
+/// with those networks and their relays. Only then: networks left later stay left; deleting `gangli.node`
+/// makes the next start put them back.
+pub fn seed_from_bundle() -> Result<()> {
+    if crate::paths::node_file().exists() {
+        return Ok(());
+    }
+    let Some(b) = crate::embed::bundled() else { return Ok(()) };
+    for n in &b.networks {
+        add_join_with(&n.code, &n.relays)?;
+    }
+    Ok(())
 }
 
 /// Join a network with its public code; the running node asks a console to admit it. Returns the local
