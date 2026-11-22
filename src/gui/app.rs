@@ -2182,6 +2182,9 @@ fn link_label(ui: &mut Ui, n: &NodeView) {
         (Some(p), true) => {
             ui.label(RichText::new(format!("{} {} ms", "direct", p.rtt_ms)).color(GREEN)).on_hover_text(format!("Directly to {}", p.remote));
         }
+        (None, true) => {
+            ui.label(RichText::new("connected").color(GREEN)).on_hover_text("Online; which path it uses is not known yet");
+        }
         _ => {
             ui.label("");
         }

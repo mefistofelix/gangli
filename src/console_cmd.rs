@@ -120,9 +120,10 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-fn link(p: &Option<PathInfo>) -> String {
+fn link(p: &Option<PathInfo>, online: bool) -> String {
     match p {
         Some(p) => format!("{} {}ms", if p.relay { "relay" } else { "direct" }, p.rtt_ms),
+        None if online => "connected".into(),
         None => String::new(),
     }
 }
@@ -161,7 +162,7 @@ pub fn print_nodes(rows: &[NodeView]) {
             if inv.mem_total > 0 { human_bytes(inv.mem_total) } else { String::new() },
             disk,
             truncate(&access, 8),
-            link(&n.path),
+            link(&n.path, n.online),
             ago
         );
     }

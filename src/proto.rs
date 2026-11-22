@@ -273,7 +273,9 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(r: &mut R) ->
 
 pub fn path_info(conn: &Connection) -> Option<PathInfo> {
     let paths = conn.paths();
-    let p = paths.iter().find(|p| p.is_selected())?;
+    // The path in use; right after the peer restarted, iroh can keep a working connection with none marked
+    // selected (seen after updates): then the fastest one it knows.
+    let p = paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().min_by_key(|p| p.rtt()))?;
     let remote = format!("{:?}", p.remote_addr());
     let mut all: Vec<(bool, String)> = paths
         .iter()
