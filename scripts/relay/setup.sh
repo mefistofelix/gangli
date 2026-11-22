@@ -5,17 +5,19 @@
 #   awk '{print $3}' KNOCKFILE | ssh ubuntu@VM 'sudo install -m 600 /dev/stdin /etc/knockd.key'
 #   awk '{print "KNOCK_PORT=" $2}' KNOCKFILE | ssh ubuntu@VM 'sudo install -m 600 /dev/stdin /etc/knockd.env'
 #   ssh ubuntu@VM 'bash -s -- IP open' < scripts/relay/setup.sh      # SSH still reachable without a knock
-#   (open the cloud firewall, knock, check that ssh works, then)
+#   (open the cloud firewall: TCP 443, UDP 7842, TCP 22, UDP knock port; knock, check that ssh works, then)
 #   ssh ubuntu@VM 'bash -s -- IP knock' < scripts/relay/setup.sh     # SSH only after a knock
 #
 # KNOCKFILE is one line "host port key-hex" kept only on your computer (knock.ps1 / knock.py read it).
-# What it installs: iroh-relay (release matching gangli's iroh) as a service on TCP 443 + UDP 7842, a Let's
-# Encrypt certificate for the bare IP (6-day profile) renewed by certbot (snap), the knock daemon, a firewall
-# that drops everything else without answering, and a keep-alive against Oracle's idle reclaim.
+# What it installs: iroh-relay (release matching gangli's iroh) as a service on TCP 443 + UDP 7842 at
+# https://<ip with dashes>.sslip.io/ with its own Let's Encrypt certificate (built-in ACME, TLS-ALPN-01 on
+# 443: nothing else), the knock daemon, a firewall that drops everything else without answering, and a
+# keep-alive against Oracle's idle reclaim.
 # Safe to run again. Every firewall change arms a 5-minute rollback first; the last step cancels it.
 set -e
 IP=${1:?usage: setup.sh IP open|knock}
 MODE=${2:-open}
+HOST=$(echo "$IP" | tr . -).sslip.io
 VER=v1.5.0
 SHA=99a14d2ff541711f1b175a15e0c1571a45f46c171d655cda29849d91d90a5c9c  # iroh-relay-$VER-aarch64-unknown-linux-musl.tar.gz
 [ "$(uname -m)" = aarch64 ] || { echo "SHA is for aarch64: set VER/SHA for $(uname -m)"; exit 2; }
@@ -31,11 +33,11 @@ if [ "$(/usr/local/bin/iroh-relay --version 2>/dev/null)" != "iroh-relay ${VER#v
 fi
 id iroh-relay > /dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin iroh-relay
 sudo install -d -o iroh-relay -g iroh-relay -m 0750 /var/lib/iroh-relay
-sudo tee /etc/iroh-relay.toml > /dev/null <<'EOF'
-# iroh relay for gangli (docs/RELAY.md). Certificate: Let's Encrypt for the bare IP, renewed by certbot and
-# reloaded by the relay from /var/lib/iroh-relay.
+sudo tee /etc/iroh-relay.toml > /dev/null <<EOF
+# iroh relay for gangli (docs/RELAY.md): https://$HOST/ ($HOST is $IP, sslip.io answers it). The relay
+# gets and renews its own Let's Encrypt certificate (TLS-ALPN-01 on 443), kept in /var/lib/iroh-relay.
 enable_relay = true
-# plain HTTP (captive portal check) stays local: port 80 belongs to certbot's challenge
+# plain HTTP (captive portal check) stays local: one open port less
 http_bind_addr = "127.0.0.1:3340"
 enable_quic_addr_discovery = true
 enable_metrics = true
@@ -44,7 +46,10 @@ metrics_bind_addr = "127.0.0.1:9090"
 [tls]
 https_bind_addr = "[::]:443"
 quic_bind_addr = "[::]:7842"
-cert_mode = "Reloading"
+cert_mode = "LetsEncrypt"
+hostname = "$HOST"
+# required by iroh-relay; Let's Encrypt no longer sends mail, so not a real mailbox
+contact = "relay@$HOST"
 cert_dir = "/var/lib/iroh-relay"
 EOF
 sudo tee /etc/systemd/system/iroh-relay.service > /dev/null <<'EOF'
@@ -52,7 +57,6 @@ sudo tee /etc/systemd/system/iroh-relay.service > /dev/null <<'EOF'
 Description=iroh relay (gangli)
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/var/lib/iroh-relay/default.crt
 
 [Service]
 User=iroh-relay
@@ -75,22 +79,10 @@ OOMScoreAdjust=-500
 WantedBy=multi-user.target
 EOF
 
-# ---- certbot (snap: 5.3+ is needed for IP address certificates) and its hooks ----
-command -v /snap/bin/certbot > /dev/null || sudo snap install --classic certbot > /dev/null
-sudo install -d /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post /etc/letsencrypt/renewal-hooks/deploy
-# TCP 80 is open only while certbot renews
-printf '#!/bin/sh\niptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p tcp --dport 80 -j ACCEPT\n' \
-  | sudo tee /etc/letsencrypt/renewal-hooks/pre/open-80.sh > /dev/null
-printf '#!/bin/sh\nwhile iptables -D INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; do :; done\n' \
-  | sudo tee /etc/letsencrypt/renewal-hooks/post/close-80.sh > /dev/null
-sudo tee /etc/letsencrypt/renewal-hooks/deploy/iroh-relay.sh > /dev/null <<EOF
-#!/bin/sh
-# a new certificate for the relay: it reloads the files by itself; started here the first time
-install -o iroh-relay -g iroh-relay -m 0644 /etc/letsencrypt/live/$IP/fullchain.pem /var/lib/iroh-relay/default.crt
-install -o iroh-relay -g iroh-relay -m 0600 /etc/letsencrypt/live/$IP/privkey.pem /var/lib/iroh-relay/default.key
-systemctl is-active --quiet iroh-relay || systemctl start iroh-relay
-EOF
-sudo chmod 0755 /etc/letsencrypt/renewal-hooks/*/*.sh
+# an earlier version used certbot for an IP certificate: gone
+if snap list certbot > /dev/null 2>&1; then sudo snap remove --purge certbot > /dev/null; fi
+sudo rm -rf /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /usr/local/bin/certbot \
+  /var/lib/iroh-relay/default.crt /var/lib/iroh-relay/default.key
 
 # ---- keep-alive: Oracle reclaims an Always Free instance when, over 7 days, CPU (95th percentile), network
 # and memory (A1 shapes) all stay below 20% ----
@@ -188,15 +180,9 @@ r -j DROP
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now oci-keepalive knockd > /dev/null 2>&1
+# the relay asks Let's Encrypt for its certificate by itself (and retries until TCP 443 is reachable)
 sudo systemctl enable iroh-relay > /dev/null 2>&1
-
-# ---- the certificate (first time; then the snap's timer renews it) ----
-if [ ! -f /var/lib/iroh-relay/default.crt ]; then
-  sudo /snap/bin/certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email \
-    --preferred-profile shortlived --ip-address "$IP" \
-    --pre-hook /etc/letsencrypt/renewal-hooks/pre/open-80.sh --post-hook /etc/letsencrypt/renewal-hooks/post/close-80.sh \
-    || echo "no certificate yet: is TCP 80 open in the cloud firewall?"
-fi
+sudo systemctl restart iroh-relay
 
 echo "firewall ($MODE): rollback in 5 minutes unless you run, from a NEW ssh session:"
 echo "  sudo systemctl stop fw-rollback.timer && sudo sh -c 'iptables-save > /etc/iptables/rules.v4'"

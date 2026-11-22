@@ -1,6 +1,6 @@
 # Knock on the relay VM (scripts/relay/knockd.py, docs/RELAY.md): SSH opens to this address for 60 s.
 # The knock file is one line "host port key-hex", readable only by you (never in this repository).
-# usage: powershell -File knock.ps1 <knock file>        then ssh / PuTTY / WinSCP within 60 s
+# usage: powershell -ExecutionPolicy Bypass -File knock.ps1 <knock file>     then ssh / PuTTY / WinSCP within 60 s
 param([Parameter(Mandatory = $true)][string]$KnockFile)
 $ErrorActionPreference = 'Stop'
 $f = (Get-Content -Raw $KnockFile).Trim() -split '\s+'

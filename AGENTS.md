@@ -92,7 +92,7 @@ scripts/ci-test.sh       end-to-end test on the runner (service, console, exec, 
 scripts/gui-drive.sh     drives the Linux GUI with xdotool (WSLg) for tests
 scripts/tray-test.py     a StatusNotifier watcher + host: prints gangli's Linux tray, clicks its menu
 scripts/tray-panel.sh    a real tray in WSLg (xfce4-panel, notification area only) for GUI tests
-scripts/relay/          our iroh relay VM: setup.sh (relay, IP certificate, firewall, keep-alive), knockd.py + knock.ps1 / knock.py (SSH after a knock)
+scripts/relay/          our iroh relay VM: setup.sh (relay with its own certificate, firewall, keep-alive), knockd.py + knock.ps1 / knock.py (SSH after a knock)
 .tools/               git-ignored local tools
 ```
 
