@@ -378,7 +378,8 @@ turns off. Windows: the active power plan through the power API (powrprof, no ex
 `pmset` (sleep only, hibernation follows it); Linux: sleep is on or off for the whole system (systemd's
 sleep targets masked), the idle timeouts belong to the desktop. Changing them needs the service.
 
-Names: the admitting console names nodes (slug of the hostname, unique per network, written in their certificate); addressing is `name` or
+Names: the admitting console names nodes (slug of the hostname and, when someone is logged in, that user:
+`asuspc-rocar` **[decided 2026-11-22]**; unique per network, written in their certificate); addressing is `name` or
 `name.network` when ambiguous.
 
 ## 10. Node: run, install, elevation, embedded code

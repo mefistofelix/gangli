@@ -108,6 +108,29 @@ impl Inventory {
     }
 
     /// "Windows 11 Home", "Ubuntu 24.04 LTS", "macOS 15.1": the OS name without repeating it.
+    /// The name a console gives a new machine: its host name and, when someone is logged in, that user
+    /// ("asuspc-rocar"), so a list of family PCs says whose each one is.
+    pub fn default_name(&self) -> String {
+        let host = crate::util::short_host(&self.hostname);
+        let user = self.logged_in.first().map(|u| u.trim_end_matches(" (disconnected)")).unwrap_or("");
+        // "DOMAIN\user", "user@host": the user part.
+        let user = user.rsplit('\\').next().unwrap_or(user).split('@').next().unwrap_or(user);
+        if user.is_empty() || crate::util::slug(user) == crate::util::slug(host) {
+            host.to_string()
+        } else {
+            format!("{host}-{user}")
+        }
+    }
+
+    /// The first user logged in, for lists ("rocar", "rocar (disconnected)").
+    pub fn user_label(&self) -> String {
+        match self.logged_in.len() {
+            0 => String::new(),
+            1 => self.logged_in[0].clone(),
+            n => format!("{} +{}", self.logged_in[0], n - 1),
+        }
+    }
+
     /// "plugged in", "on battery, 63 %", "plugged in, 100 %"; empty when unknown.
     pub fn power_label(&self) -> String {
         let src = match self.on_ac {
@@ -304,4 +327,22 @@ fn local_users() -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_names() {
+        let mut inv = Inventory { hostname: "ASUSPC.local".into(), ..Default::default() };
+        assert_eq!(inv.default_name(), "ASUSPC");
+        inv.logged_in = vec!["rocar (disconnected)".into()];
+        assert_eq!(inv.default_name(), "ASUSPC-rocar");
+        inv.logged_in = vec![r"WORK\anna".into(), "bob".into()];
+        assert_eq!(inv.default_name(), "ASUSPC-anna");
+        assert_eq!(inv.user_label(), r"WORK\anna +1");
+        inv.logged_in = vec!["asuspc".into()];
+        assert_eq!(inv.default_name(), "ASUSPC");
+    }
 }

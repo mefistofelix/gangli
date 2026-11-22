@@ -620,7 +620,7 @@ impl Console {
                 let old = n.nodes.iter().find(|x| x.id == peer_s).cloned();
                 let name = match &old {
                     Some(x) => x.name.clone(),
-                    None => unique_name(crate::util::short_host(&inventory.hostname), n.nodes.iter().map(|x| x.name.as_str())),
+                    None => unique_name(&inventory.default_name(), n.nodes.iter().map(|x| x.name.as_str())),
                 };
                 let cert = Cert::issue(&key, &peer_s, CertKind::Node, &name, TEN_YEARS);
                 n.nodes.retain(|x| x.id != peer_s);

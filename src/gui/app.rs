@@ -733,10 +733,12 @@ impl App {
         let t = now();
         let mut nodes = self.nodes.clone();
         nodes.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
-        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 8 } else { 7 }).spacing([14.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("machines").striped(true).num_columns(if many_nets { 10 } else { 9 }).spacing([14.0, 8.0]).show(ui, |ui| {
             ui.label("");
             ui.label(RichText::new("Name").strong());
+            ui.label(RichText::new("User").strong()).on_hover_text("Who is logged in on it now");
             ui.label(RichText::new("System").strong());
+            ui.label(RichText::new("gangli").strong()).on_hover_text("The gangli version it runs");
             ui.label(RichText::new("LAN address").strong());
             ui.label(RichText::new("Link").strong());
             ui.label(RichText::new("Traffic").strong()).on_hover_text("Received and sent per second, all sessions with that machine");
@@ -747,7 +749,7 @@ impl App {
             ui.end_row();
             for n in &nodes {
                 let inv = n.inventory.clone().unwrap_or_default();
-                let hay = format!("{} {} {} {}", n.name, n.network, inv.os_label(), inv.ips.join(" ")).to_lowercase();
+                let hay = format!("{} {} {} {} {}", n.name, n.network, inv.os_label(), inv.ips.join(" "), inv.logged_in.join(" ")).to_lowercase();
                 if !filter.is_empty() && !hay.contains(&filter) {
                     continue;
                 }
@@ -757,7 +759,12 @@ impl App {
                     self.selected = if sel { None } else { Some(n.id.clone()) };
                     self.terms_polled = None;
                 }
+                ui.label(inv.user_label());
                 ui.label(inv.os_label());
+                let old = !inv.version.is_empty() && inv.version != crate::build_version();
+                let color = if old { AMBER } else { ui.visuals().text_color() };
+                ui.label(RichText::new(inv.version.as_str()).color(color))
+                    .on_hover_text(if old { "Another version than this console's: Update in its details" } else { "Same as this console" });
                 ui.label(inv.ips.first().cloned().unwrap_or_default());
                 link_label(ui, n);
                 match (&n.path, n.online) {
