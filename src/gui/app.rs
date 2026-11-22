@@ -46,9 +46,9 @@ enum Modal {
     Relays { network: String, text: String },
 }
 
-/// `https://relay.example.org/` → `relay.example.org`.
+/// `https://relay.example.org/` (or iroh's fully qualified `…org./`) → `relay.example.org`.
 fn relay_host(u: &str) -> String {
-    u.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string()
+    u.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').trim_end_matches('.').to_string()
 }
 
 struct Toast {
