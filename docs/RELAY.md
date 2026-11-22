@@ -14,7 +14,7 @@ address, the SSH key and the knock file are the owner's, never in this repositor
   the `iroh-relay` system user with only `CAP_NET_BIND_SERVICE`: relaying on TCP 443, QUIC address discovery
   on UDP 7842; plain HTTP and metrics only on 127.0.0.1.
 - **Name and certificate [decided 2026-11-22]**: `https://<ip-with-dashes>.sslip.io/` (sslip.io answers
-  `92-5-87-7.sslip.io` with `92.5.87.7`: no domain to own or keep, the name is only the IP). The relay gets
+  `1-2-3-4.sslip.io` with `1.2.3.4`: no domain to own or keep, the name is only the IP). The relay gets
   and renews its own Let's Encrypt certificate (`cert_mode = "LetsEncrypt"`, TLS-ALPN-01 on 443, like
   Caddy; 90 days, cached in `/var/lib/iroh-relay`): no certbot, no port 80 (that is HTTP-01, another
   challenge). Mind the order: TCP 443 must be reachable *before* the relay first starts, or it burns Let's
