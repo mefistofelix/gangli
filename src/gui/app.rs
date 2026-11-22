@@ -657,6 +657,12 @@ impl App {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("gangli").strong().size(19.0).color(ACCENT));
+            let v = ui
+                .add(egui::Label::new(RichText::new(crate::build_version()).weak().small()).sense(egui::Sense::click()))
+                .on_hover_text(format!("{} — This computer to update it", crate::version_line()));
+            if v.clicked() {
+                self.page = Page::Computer;
+            }
             ui.add_space(10.0);
             let pages = [
                 (Page::Machines, "Machines"),
