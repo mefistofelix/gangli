@@ -1,9 +1,54 @@
-# Own iroh relay — options for later
+# Own iroh relay
 
-gangli uses the **public n0 relays** for now **[decided 2026-11-20]**. The iroh docs advise against them in
-production: they are shared, rate limited and without guarantees. This page lists ways to run our own relay
-for free or nearly, researched 2026-11-20, **not tried yet**. Whatever is chosen, gangli will take a relay
-list in its config next to the binary (`RelayMode::Custom`), keeping the n0 relays as fallback.
+gangli uses the **public n0 relays** by default **[decided 2026-11-20]**. The iroh docs advise against them in
+production: they are shared, rate limited and without guarantees. gangli takes a relay list in its config
+next to the binary (`relays`, `relays_n0_fallback`: `RelayMode::Custom`, ours first, n0 as fallback).
+
+**Our relay [set up 2026-11-22]**: an Oracle Cloud Always Free VM (Ampere A1, 2 OCPU, 12 GB, Ubuntu), set up
+by [`scripts/relay/setup.sh`](../scripts/relay/setup.sh); details in *What runs on the relay VM* below. Its
+address, the SSH key and the knock file are the owner's, never in this repository.
+
+## What runs on the relay VM
+
+- **iroh-relay**, the release matching gangli's iroh (`v1.5.0`, checked against the release's SHA-256), as
+  the `iroh-relay` system user with only `CAP_NET_BIND_SERVICE`: relaying on TCP 443, QUIC address discovery
+  on UDP 7842; plain HTTP and metrics only on 127.0.0.1. URL: `https://<ip>/`.
+- **Certificate for the bare IP**, no DNS name (so no DNS service to depend on): Let's Encrypt issues IP
+  certificates only with its 6-day `shortlived` profile (generally available since 2026-01-15), through
+  **certbot from the snap** (5.3+ for `--ip-address`; the Ubuntu package is too old), standalone on TCP 80,
+  no email. The snap's timer renews it; hooks open TCP 80 only during the renewal and copy the new files
+  into `/var/lib/iroh-relay`, which the relay reloads by itself (`cert_mode = "Reloading"`). A free
+  `*.sslip.io` name was rejected: sslip.io is not on the Public Suffix List, so every sslip.io user in the
+  world shares Let's Encrypt's 50-certificates-a-week limit.
+- **Firewall that answers nothing**: the VM's iptables accept only established traffic, TCP 443 and UDP 7842,
+  and DROP the rest (no ICMP host-prohibited, no ping): a scan sees the relay and nothing else. `rpcbind` is
+  off. The cloud firewall (VCN security list) must let in TCP 443, UDP 7842, TCP 80 (renewals), TCP 22 and
+  the knock port; the VM's own firewall is what hides them.
+- **SSH only after a knock** ([`knockd.py`](../scripts/relay/knockd.py)): one UDP packet to a secret port,
+  `timestamp | nonce | HMAC-SHA256(key, ...)`, valid for 30 s and never twice. Nothing listens on that port:
+  the firewall drops it like any other and the daemon reads it from a packet socket, so it cannot be told
+  apart from a closed port, and a wrong or replayed packet gets no answer at all. A valid knock opens TCP 22
+  for 60 s to the sender's address only (iptables `recent` list); open sessions stay open. Clients:
+  [`knock.ps1`](../scripts/relay/knock.ps1) (Windows, nothing to install) and
+  [`knock.py`](../scripts/relay/knock.py); the knock file (`host port key-hex`) stays on the owner's
+  computer, owner-only. Then ssh / PuTTY / WinSCP within 60 s, with the Pageant key (password login is off).
+  With OpenSSH it can be automatic, in `~/.ssh/config`:
+
+  ```
+  Match host <ip> exec "powershell -NoProfile -File C:/path/to/knock.ps1 C:/Users/me/.ssh/relay.knock"
+  ```
+- **Not locking ourselves out**: `setup.sh` arms a 5-minute rollback (`fw-rollback` timer, restores the
+  previous rules) before every firewall change; it is cancelled only after a *new* SSH session (with a knock)
+  works. Last resort: the Oracle console's serial console or Run Command, independent of the network.
+- **Keep-alive** (`oci-keepalive`): Oracle reclaims an Always Free instance when, over 7 days, **all** of CPU
+  (95th percentile), network and memory (A1 shapes only) stay below 20%
+  ([Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm)). A relay
+  is idle by those numbers, so a small service holds 25% of the RAM (touched hourly, near zero CPU) and,
+  as a second guard, keeps one core busy 02:00–04:00 UTC in the idle scheduling class (8% of the time > the
+  5% that sets the 95th percentile; it only gets CPU nobody else wants). The Oracle Cloud Agent, which reports
+  those metrics, must stay installed. It is the first thing the OOM killer takes; the relay the last.
+
+## Options considered (2026-11-20)
 
 What a relay needs (iroh-relay, same crate n0 runs in production):
 
