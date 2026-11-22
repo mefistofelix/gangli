@@ -46,6 +46,8 @@ enum Modal {
     Confirm { text: String, op: IpcOp, done: String },
     /// A network's extra relays, one address per line.
     Relays { network: String, text: String },
+    /// This computer leaves a network (as a node).
+    Leave { network: String },
 }
 
 /// `https://relay.example.org/` (or iroh's fully qualified `…org./`) → `relay.example.org`.
@@ -99,6 +101,11 @@ struct LocalNode {
     job_output: String,
     /// When the running job ends: start the node in this window (the service was just uninstalled for it).
     then_window: bool,
+    /// What the running node (window, terminal or service) says about itself, read every few seconds off
+    /// the window thread: `None` while no node answers.
+    live: Arc<Mutex<Option<Value>>>,
+    live_busy: Arc<AtomicBool>,
+    live_at: Option<Instant>,
 }
 
 /// How this computer runs its node.
@@ -384,6 +391,9 @@ impl App {
         }
         if visible && self.node.read_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
             self.read_node();
+        }
+        if visible && self.page == Page::Computer && self.node.live_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+            self.poll_node();
         }
         let finished = self.node.job.as_ref().and_then(|j| j.lock().unwrap().take());
         if let Some(out) = finished {
@@ -1123,25 +1133,7 @@ impl App {
         ui.add_space(8.0);
         ui.label(RichText::new("Managed from a console (node)").strong());
         let busy = self.node.job.is_some();
-        // Networks of this computer.
-        if self.node.installed && self.node.networks.is_empty() {
-            ui.label(RichText::new("The service keeps its networks in its own folder (readable by the system only).").weak());
-        }
-        for (net, admitted, name, err) in &self.node.networks {
-            ui.horizontal(|ui| {
-                dot(ui, if *admitted { GREEN } else { AMBER });
-                let state = if *admitted {
-                    format!("admitted as {}", name.clone().unwrap_or_default())
-                } else {
-                    "waiting for a console of the network to admit it".to_string()
-                };
-                ui.label(RichText::new(net).strong());
-                ui.label(state);
-                if let (false, Some(e)) = (*admitted, err) {
-                    ui.label(RichText::new(e).color(RED));
-                }
-            });
-        }
+        self.node_networks(ui, busy);
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!busy, egui::Button::new(RichText::new("Pair with your phone…").strong()))
@@ -1245,6 +1237,116 @@ impl App {
             Err(_) if cancelled => {}
             Err(e) => self.toast(e, true),
         }
+    }
+
+    /// Read the running node's status off the window thread.
+    fn poll_node(&mut self) {
+        self.node.live_at = Some(Instant::now());
+        if self.node.live_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (live, busy, wake) = (self.node.live.clone(), self.node.live_busy.clone(), self.client.waker());
+        std::thread::spawn(move || {
+            *live.lock().unwrap() = crate::ipc::node_status();
+            busy.store(false, Ordering::SeqCst);
+            wake();
+        });
+    }
+
+    /// The networks this computer is a node of: admitted or not, the consoles connected now, leave.
+    fn node_networks(&mut self, ui: &mut Ui, busy: bool) {
+        let live = self.node.live.lock().unwrap().clone();
+        let t = now();
+        let mut leave = None;
+        match &live {
+            Some(v) => {
+                let nets = v["networks"].as_array().cloned().unwrap_or_default();
+                if nets.is_empty() {
+                    ui.label(RichText::new("Not in any network yet.").weak());
+                }
+                for n in &nets {
+                    let name = s(&n["name"]).to_string();
+                    let admitted = n["admitted"].as_bool() == Some(true);
+                    let connected = n["connected"].as_array().cloned().unwrap_or_default();
+                    egui::Frame::group(ui.style()).inner_margin(8).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            dot(ui, if !admitted { AMBER } else if connected.is_empty() { GREY } else { GREEN });
+                            ui.label(RichText::new(&name).strong());
+                            if admitted {
+                                ui.label(format!("as {}", s(&n["node_name"])));
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.add_enabled(!busy, egui::Button::new("Leave")).clicked() {
+                                    leave = Some(name.clone());
+                                }
+                            });
+                        });
+                        let line = if !admitted {
+                            let err = s(&n["error"]);
+                            if err.is_empty() { "Waiting for a console of the network to admit it".to_string() } else { format!("Waiting to be admitted: {err}") }
+                        } else if connected.is_empty() {
+                            match n["last_connected"].as_u64() {
+                                Some(at) => format!("No console connected now (last one {} ago)", human_ago(t.saturating_sub(at))),
+                                None => "No console connected now: they connect while they are open".to_string(),
+                            }
+                        } else {
+                            let who: Vec<String> = connected
+                                .iter()
+                                .map(|c| format!("{} (for {})", s(&c["name"]), human_ago(t.saturating_sub(c["since"].as_u64().unwrap_or(t)))))
+                                .collect();
+                            format!("Connected: {}", who.join(", "))
+                        };
+                        ui.label(RichText::new(line).weak());
+                    });
+                }
+                let relay = s(&v["relay"]);
+                if !relay.is_empty() {
+                    ui.label(RichText::new(format!("Reachable through the relay {}", relay_host(relay))).weak());
+                }
+            }
+            None if self.node.installed => {
+                ui.label(RichText::new("The service does not answer yet (starting?).").weak());
+            }
+            None => {
+                if self.node.networks.is_empty() {
+                    ui.label(RichText::new("Not in any network yet: pair with your phone, or paste a public code.").weak());
+                }
+                for (net, admitted, name, _) in self.node.networks.clone() {
+                    ui.horizontal(|ui| {
+                        dot(ui, GREY);
+                        ui.label(RichText::new(&net).strong());
+                        ui.label(if admitted { format!("as {} · the node is not running", name.unwrap_or_default()) } else { "not admitted yet · the node is not running".into() });
+                        if ui.add_enabled(!busy, egui::Button::new("Leave")).clicked() {
+                            leave = Some(net.clone());
+                        }
+                    });
+                }
+            }
+        }
+        if let Some(network) = leave {
+            self.modal = Some(Modal::Leave { network });
+        }
+    }
+
+    /// Leave a network: the node tells its consoles, which forget this computer.
+    fn leave_network(&mut self, network: String) {
+        if self.node.installed {
+            self.start_job(self.node.installed_at.clone(), vec!["leave".into(), network]);
+            return;
+        }
+        let r = crate::state::update(|st| {
+            let before = st.networks.len();
+            st.networks.retain(|m| m.name != network);
+            Ok(before != st.networks.len())
+        });
+        match r {
+            Ok(true) => self.toast(format!("Left {network}"), false),
+            Ok(false) => self.toast(format!("Not in {network}"), true),
+            Err(e) => self.toast(format!("{e:#}"), true),
+        }
+        self.read_node();
+        self.poll_node();
     }
 
     fn node_mode(&self) -> NodeMode {
@@ -1520,6 +1622,13 @@ impl App {
                 Modal::Confirm { text, .. } => {
                     ui.label(text.as_str());
                 }
+                Modal::Leave { network } => {
+                    ui.heading(format!("Leave {network}?"));
+                    ui.label(
+                        "This computer stops being a machine of that network: its consoles forget it and can no longer \
+                         reach it. To come back it must join again (phone or public code).",
+                    );
+                }
                 Modal::Relays { network, text } => {
                     ui.heading(format!("Relays of {network}"));
                     ui.label(RichText::new(
@@ -1565,6 +1674,14 @@ impl App {
                 if let Modal::Confirm { op, done, .. } = &m {
                     if ui.button(RichText::new("Yes").color(RED)).clicked() {
                         self.call(Tag::Done(done.clone()), op.clone());
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Leave { network } = &m {
+                    if ui.button(RichText::new("Leave").color(RED)).clicked() {
+                        self.leave_network(network.clone());
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {

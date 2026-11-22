@@ -129,7 +129,8 @@ bash scripts/ci.sh --release      # and, if everything passed, publish the relea
 
 - Unit tests run on every build (`cargo test` on the native target of each runner).
 - End to end on one PC, no elevation, no service: `GANGLI_DATA_DIR` puts the files in another folder, one
-  scratch folder per simulated machine (or simply copies of the binary in separate folders). `network create` on a
+  scratch folder per simulated machine (copies of the binary in separate folders without it need their own
+  `[node] status_port`: one node per computer otherwise). `network create` on a
   console (`console run` in the background of the test), `node --code` for one or more nodes (each its own
   state dir), then `nodes` / `info`; kill a node and restart it to check that it shows offline and comes back
   by itself; a second console dir with `network add <private code>` must find the machines. The traffic

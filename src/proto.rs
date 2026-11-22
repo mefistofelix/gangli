@@ -191,6 +191,8 @@ pub enum Frame {
     Pong,
     /// Node → console, only when the stable part of the inventory changed.
     Inventory { inventory: Inventory },
+    /// Node → console: this machine left the network (`gangli leave`, the GUI): forget it.
+    Leaving,
     /// Console → node: the consoles the node may knock on and, when a console set them, the network's extra
     /// relays (`None`: never set, the node keeps what it has).
     Consoles {

@@ -426,8 +426,10 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - *Tunnels*: list with on / off and state, add, remove;
   - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
   - *API*: on / off, tokens (made here, shown once; revoke);
-  - *This computer* (node): memberships and admission, **pair with your phone** (section 10), join with a
-    public code (prefilled when embedded), and **one choice for how the node runs [decided 2026-11-22]**:
+  - *This computer* (node): **a summary of its networks [decided 2026-11-22]**: for each, admitted or not
+    (and why not), its name there, the consoles connected now (and since when) or when the last one left,
+    and *Leave*; **pair with your phone** (section 10), join with a public code (prefilled when embedded),
+    and **one choice for how the node runs [decided 2026-11-22]**:
     *Off*, *While gangli is open* (in the window, as this user) or *Always, as a service* (`gangli install`,
     from where it is). Changing it does the rest: stop the window's node, install or uninstall the service
     (one system prompt), start the window's node. Without the service, the window runs the node by itself
@@ -470,6 +472,16 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   (`gui/autostart.rs`): a login item of the user (Windows `Run` key, XDG autostart entry, LaunchAgent
   without KeepAlive) that runs `gangli gui --hidden`, which stays in the tray (or shows the window after
   3 s when there is no tray). Never a service.
+- **The node's status, one node per computer [decided 2026-11-22]**: the running node (window, terminal or
+  service) answers `GET /node/status` on `127.0.0.1:7374` (`[node] status_port`; none under
+  `GANGLI_DATA_DIR` unless set): its memberships, the consoles connected now, its relay. Read-only and
+  without secrets, only with the `X-Gangli` header; it is how the GUI and `gangli status` see a service
+  whose `gangli.node` only the system can read. The port also keeps a second node from starting on the same
+  computer (it retries every 10 s, so it takes over when the first one stops).
+- **Leaving a network** (`gangli leave`, *Leave* in the GUI): the membership goes from `gangli.node`; the
+  running node then sends `Leaving` on that network's live sessions and closes them; those consoles forget
+  the machine (its id goes to the removed list, which `Sync` passes to the network's other consoles).
+  Joining again with the public code takes it off the list.
 - **One window per computer [decided 2026-11-22]**: a gangli started while another one's window is open (from
   any folder) brings that window up and closes. It asks with `POST /gui/show` on its folder's console port
   and on the default one (7373): no token, since it can only raise the window (or learn there is none), and

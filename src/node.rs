@@ -67,19 +67,31 @@ pub fn run_blocking(stop: Arc<AtomicBool>) {
     });
 }
 
-#[derive(Debug)]
 struct Session {
     network: String,
+    /// The console (its endpoint id, the name in its certificate) and since when.
+    console: String,
+    console_name: String,
+    since: u64,
+    conn: Connection,
     tx: mpsc::UnboundedSender<Frame>,
 }
 
-/// Open console sessions, shared by the accept handler and the main loop.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Session({}, {})", self.network, self.console_name)
+    }
+}
+
+/// Open console sessions, shared by the accept handler, the main loop and the status server.
 #[derive(Debug, Default)]
 struct Sessions {
     next: AtomicU64,
     map: Mutex<HashMap<u64, Session>>,
     /// Networks whose session ended since the main loop last looked.
     ended: Mutex<Vec<String>>,
+    /// Network → when its last console session ended (this run).
+    last: Mutex<HashMap<String, u64>>,
 }
 
 impl Sessions {
@@ -90,8 +102,29 @@ impl Sessions {
     }
     fn remove(&self, id: u64) {
         if let Some(s) = self.map.lock().unwrap().remove(&id) {
+            self.last.lock().unwrap().insert(s.network.clone(), now());
             self.ended.lock().unwrap().push(s.network);
         }
+    }
+    /// Networks this machine left: tell their consoles (they forget it) and close.
+    fn leave_gone(&self, still: &[String]) {
+        for s in self.map.lock().unwrap().values() {
+            if !still.contains(&s.network) {
+                let _ = s.tx.send(Frame::Leaving);
+                let conn = s.conn.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    conn.close(0u32.into(), b"left the network");
+                });
+            }
+        }
+    }
+    /// The consoles connected now, per network: (id, name, since).
+    fn connected(&self, net: &str) -> Vec<(String, String, u64)> {
+        let mut v: Vec<_> = self.map.lock().unwrap().values().filter(|s| s.network == net).map(|s| (s.console.clone(), s.console_name.clone(), s.since)).collect();
+        v.sort();
+        v.dedup_by(|a, b| a.0 == b.0);
+        v
     }
     fn has_network(&self, net: &str) -> bool {
         self.map.lock().unwrap().values().any(|s| s.network == net)
@@ -143,6 +176,15 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
     let sk = state::node_key()?;
     let me = sk.public();
     let conf = state::load()?.node;
+    // One node per computer: the status port is taken by the one already running.
+    let status = match conf.status_port() {
+        Some(port) => Some(
+            tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .map_err(|e| anyhow!("another gangli node already runs on this computer (127.0.0.1:{port}: {e})"))?,
+        ),
+        None => None,
+    };
     let mut builder = iroh::Endpoint::builder(presets::N0).secret_key(sk);
     if let Some(m) = crate::util::relay_mode(&conf.relays, conf.relays_n0_fallback)? {
         builder = builder.relay_mode(m);
@@ -151,6 +193,7 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
     let sessions = Arc::new(Sessions::default());
     let router = Router::builder(ep).accept(proto::ALPN, NodeHandler { sessions: sessions.clone() }).spawn();
     log_line(&format!("{} node running, id {me}", crate::version_line()));
+    let status_task = status.map(|l| tokio::spawn(serve_status(l, sessions.clone(), me)));
 
     let inflight: Arc<Mutex<HashSet<String>>> = Arc::default();
     // Networks to knock on, when, and whether to look the directory up if no known console answers.
@@ -181,6 +224,10 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
             relays_wanted = want;
         }
         *HOME_RELAY.lock().unwrap() = crate::util::home_relay(router.endpoint());
+
+        // Networks left (`gangli leave`, the GUI): their consoles are told and their sessions closed.
+        let ids: Vec<String> = st.networks.iter().map(|m| m.id.clone()).collect();
+        sessions.leave_gone(&ids);
 
         // Local inventory check: no network traffic unless something changed.
         if last_check.is_none_or(|t| t.elapsed() >= LOCAL_CHECK) {
@@ -223,8 +270,66 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     log_line("stopping");
+    if let Some(t) = status_task {
+        t.abort();
+    }
     router.shutdown().await.ctx("shutdown")?;
     Ok(())
+}
+
+/// What the running node says about itself on `127.0.0.1` (for the GUI and `gangli status`, whoever runs the
+/// node: this window, a terminal or the service). Read-only and without secrets: memberships, the consoles
+/// connected now. Only with the `X-Gangli` header (a web page cannot send it to localhost).
+async fn serve_status(listener: tokio::net::TcpListener, sessions: Arc<Sessions>, me: PublicKey) {
+    loop {
+        let Ok((sock, _)) = listener.accept().await else { continue };
+        let sessions = sessions.clone();
+        tokio::spawn(async move {
+            let (r, mut w) = sock.into_split();
+            let Ok(req) = crate::http::read_request(r).await else { return };
+            if req.method != "GET" || req.path != "/node/status" || !req.gangli {
+                let _ = crate::http::write_response(&mut w, 404, &serde_json::json!({ "ok": false })).await;
+                return;
+            }
+            let _ = crate::http::write_response(&mut w, 200, &status_json(&sessions, &me)).await;
+        });
+    }
+}
+
+fn status_json(sessions: &Sessions, me: &PublicKey) -> serde_json::Value {
+    let st = state::load().unwrap_or_default();
+    let last = sessions.last.lock().unwrap().clone();
+    let nets: Vec<serde_json::Value> = st
+        .networks
+        .iter()
+        .map(|m| {
+            let connected: Vec<serde_json::Value> = sessions
+                .connected(&m.id)
+                .into_iter()
+                .map(|(id, name, since)| serde_json::json!({ "id": id, "name": name, "since": since }))
+                .collect();
+            serde_json::json!({
+                "name": m.name,
+                "id": m.id,
+                "admitted": m.cert.is_some(),
+                "node_name": m.node_name,
+                "error": m.last_error,
+                "consoles_known": m.consoles.len(),
+                "connected": connected,
+                "last_connected": last.get(&m.id),
+                "relays": m.relays,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "version": crate::build_version(),
+        "node_id": me.to_string(),
+        "service": crate::paths::service_installed(),
+        "relay": HOME_RELAY.lock().unwrap().clone(),
+        "folder": crate::paths::base_dir().display().to_string(),
+        "networks": nets,
+    })
 }
 
 /// Consoles listed in the network's public directory.
@@ -471,7 +576,14 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     authed = true;
                     my_name = node_name;
                     let (tx, rx) = mpsc::unbounded_channel();
-                    let id = sessions.add(Session { network: net.clone(), tx: tx.clone() });
+                    let id = sessions.add(Session {
+                        network: net.clone(),
+                        console: peer.to_string(),
+                        console_name: cert.body.name.clone(),
+                        since: now(),
+                        conn: conn.clone(),
+                        tx: tx.clone(),
+                    });
                     tokio::spawn(session(send, recv, tx, rx, sessions.clone(), id, net, peer));
                 }
                 Err(e) => {

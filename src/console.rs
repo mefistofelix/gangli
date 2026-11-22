@@ -502,6 +502,23 @@ impl Console {
         self.save();
     }
 
+    /// A machine left the network (it said so on its session): forget it, as `forget` does; the other
+    /// consoles learn it at the next sync (the removed list).
+    fn node_left(&self, net: &str, node: &str) {
+        let name = {
+            let mut st = self.state.lock().unwrap();
+            let Some(n) = st.networks.iter_mut().find(|n| n.id == net) else { return };
+            let name = n.nodes.iter().find(|x| x.id == node).map(|x| x.name.clone()).unwrap_or_default();
+            n.nodes.retain(|x| x.id != node);
+            if !n.removed.iter().any(|r| r == node) {
+                n.removed.push(node.to_string());
+            }
+            format!("{name} left {}", n.name)
+        };
+        self.save();
+        clog(&name);
+    }
+
     /// Tell the live nodes of a network about the current console list and relays.
     fn push_consoles(&self, net: &str) {
         let (ids, relays, nodes): (Vec<String>, Option<Vec<String>>, Vec<String>) = {
@@ -818,12 +835,14 @@ async fn start_session(c: Arc<Console>, conn: Arc<Connection>, net: String, node
     });
     let last = Arc::new(AtomicU64::new(now()));
     {
-        let (c, conn, last, node) = (c.clone(), conn.clone(), last.clone(), node.clone());
+        let (c, conn, last, node, net) = (c.clone(), conn.clone(), last.clone(), node.clone(), net.clone());
         tokio::spawn(async move {
             while let Ok(f) = proto::read_frame::<_, Frame>(&mut recv).await {
                 last.store(now(), Ordering::Relaxed);
-                if let Frame::Inventory { inventory } = f {
-                    c.on_inventory(&node, inventory);
+                match f {
+                    Frame::Inventory { inventory } => c.on_inventory(&node, inventory),
+                    Frame::Leaving => c.node_left(&net, &node),
+                    _ => {}
                 }
             }
             conn.close(0u32.into(), b"session ended");

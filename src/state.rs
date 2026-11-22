@@ -45,6 +45,27 @@ pub struct NodeConf {
     /// This computer turns it off).
     #[serde(default = "yes")]
     pub window_node: bool,
+    /// Port of the node's status on 127.0.0.1 (read-only; also keeps a second node from starting). Default
+    /// 7374; none in the development mode (`GANGLI_DATA_DIR`) unless set here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_port: Option<u16>,
+}
+
+pub const STATUS_PORT: u16 = 7374;
+
+impl NodeConf {
+    pub fn status_port(&self) -> Option<u16> {
+        self.status_port.or_else(|| crate::paths::dev_override().is_none().then_some(STATUS_PORT))
+    }
+}
+
+/// Where to ask the running node for its status: this folder's setting, else the default (the service's
+/// `gangli.node` is readable by the system only).
+pub fn status_port() -> Option<u16> {
+    match load() {
+        Ok(st) => st.node.status_port(),
+        Err(_) => Some(STATUS_PORT),
+    }
 }
 
 fn yes() -> bool {
@@ -60,6 +81,7 @@ impl Default for NodeConf {
             relays: vec![],
             relays_n0_fallback: true,
             window_node: true,
+            status_port: None,
         }
     }
 }

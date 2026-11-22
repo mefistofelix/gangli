@@ -147,7 +147,7 @@ pub fn show_running_gui() -> Option<bool> {
         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
         let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { continue };
         let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
-        if let Ok(v) = crate::http::post_bare_blocking(&mut s, "/gui/show") {
+        if let Ok(v) = crate::http::bare_blocking(&mut s, "POST", "/gui/show") {
             if v["shown"].as_bool() == Some(true) {
                 return Some(true);
             }
@@ -157,6 +157,16 @@ pub fn show_running_gui() -> Option<bool> {
         }
     }
     answer
+}
+
+/// What the node running on this computer (window, terminal or service) says about itself; `None` when no
+/// node runs.
+pub fn node_status() -> Option<Value> {
+    let port = crate::state::status_port()?;
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(400)).ok()?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+    crate::http::bare_blocking(&mut s, "GET", "/node/status").ok().filter(|v| v["ok"].as_bool() == Some(true))
 }
 
 /// Only on an open console (`console stop`).

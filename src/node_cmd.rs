@@ -109,7 +109,7 @@ pub fn leave(network: &str, json: bool) -> Result<()> {
     if json {
         print_json(json!({ "left": network }));
     } else {
-        println!("left {network}");
+        println!("left {network} (a running node tells the network's connected consoles, which forget this machine)");
     }
     Ok(())
 }
@@ -120,6 +120,17 @@ pub fn status(json: bool) -> Result<()> {
     let st = state::load()?;
     let t = crate::util::now();
     let mode = if crate::paths::service_installed() { "service" } else { "user" };
+    // The running node (if any) says which consoles are connected now.
+    let live = crate::ipc::node_status();
+    let connected = |id: &str| -> Vec<serde_json::Value> {
+        live.as_ref()
+            .and_then(|v| v["networks"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| n["id"].as_str() == Some(id))
+            .and_then(|n| n["connected"].as_array().cloned())
+            .unwrap_or_default()
+    };
     let nets: Vec<_> = st
         .networks
         .iter()
@@ -130,17 +141,25 @@ pub fn status(json: bool) -> Result<()> {
                 "state": if m.cert.is_some() { "admitted" } else { "waiting for a console" },
                 "node_name": m.node_name,
                 "consoles": m.consoles.len(),
+                "connected": connected(&m.id),
                 "joined": m.joined,
                 "error": m.last_error,
             })
         })
         .collect();
     if json {
-        print_json(json!({ "version": crate::build_version(), "node_id": me.to_string(), "mode": mode, "networks": nets }));
+        print_json(json!({
+            "version": crate::build_version(),
+            "node_id": me.to_string(),
+            "mode": mode,
+            "running": live.is_some(),
+            "networks": nets,
+        }));
         return Ok(());
     }
     println!("{}", crate::version_line());
     println!("node id {me} ({mode} mode, {})", crate::paths::node_file().display());
+    println!("{}", if live.is_some() { "the node is running" } else { "the node is not running (`gangli node`, or `gangli install`)" });
     if nets.is_empty() {
         println!("not in any network: `gangli join <public code>`");
     }
@@ -154,6 +173,10 @@ pub fn status(json: bool) -> Result<()> {
         }
         if let (None, Some(e)) = (&m.cert, &m.last_error) {
             line += &format!(" ({e})");
+        }
+        let now_on: Vec<String> = v["connected"].as_array().map(|a| a.iter().map(|c| c["name"].as_str().unwrap_or("?").to_string()).collect()).unwrap_or_default();
+        if !now_on.is_empty() {
+            line += &format!("; connected now: {}", now_on.join(", "));
         }
         println!("{line}");
     }

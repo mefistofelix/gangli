@@ -54,10 +54,10 @@ pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(r: R) -> Result<Reque
     Ok(Request { method, path, token, gangli, body })
 }
 
-/// Blocking client side, no token: `POST path` with the `X-Gangli` header and no body.
-pub fn post_bare_blocking(stream: &mut std::net::TcpStream, path: &str) -> Result<serde_json::Value> {
+/// Blocking client side, no token: `method path` with the `X-Gangli` header and no body.
+pub fn bare_blocking(stream: &mut std::net::TcpStream, method: &str, path: &str) -> Result<serde_json::Value> {
     use std::io::{Read, Write};
-    let req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Gangli: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Gangli: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes())?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
