@@ -548,8 +548,10 @@ mod tests {
     fn cli_parses() {
         let cli = super::Cli::try_parse_from(["gangli", "install", "--code", "abc"]).unwrap();
         assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_), .. })));
-        let cli = super::Cli::try_parse_from(["gangli", "install", "--invite", "abc"]).unwrap();
-        assert!(matches!(cli.command, Some(super::Command::Install { code: Some(_), .. })));
+        assert!(super::Cli::try_parse_from(["gangli", "install", "--invite", "abc"]).is_err());
+        let cli = super::Cli::try_parse_from(["gangli", "join", "a", "b"]).unwrap();
+        assert!(matches!(cli.command, Some(super::Command::Join { codes }) if codes.len() == 2));
+        assert!(super::Cli::try_parse_from(["gangli", "join"]).is_err());
         let cli = super::Cli::try_parse_from(["gangli", "network", "add", "k", "--json"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Some(super::Command::Network(super::NetworkCmd::Add { .. }))));
