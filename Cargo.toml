@@ -55,7 +55,8 @@ rustix = { version = "1.1.6", features = ["fs", "process", "pty", "termios"] }
 
 # GUI: eframe (winit + OpenGL) and tray-icon on Windows and macOS
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }
+# `clipboard`: without it copy (codes, passwords, tokens, instructions) and paste (the terminal) do nothing
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard"] }
 tray-icon = { version = "0.26.1", default-features = false }
 
 # GUI on Linux without any system library: X11 protocol in pure Rust, egui drawn on the CPU, tray over D-Bus

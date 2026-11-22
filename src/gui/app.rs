@@ -307,6 +307,10 @@ impl App {
             app.open_term(&t, &name, None, None);
         }
         // For tests: show the pairing QR at once.
+        // Tests: put this text on the clipboard at the first frame (the clipboard works on every backend).
+        if let Ok(t) = std::env::var("GANGLI_GUI_TEST_COPY") {
+            app.copy = Some(t);
+        }
         if std::env::var_os("GANGLI_GUI_PAIR").is_some() {
             app.page = Page::Computer;
             app.start_pairing();

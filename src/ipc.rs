@@ -151,7 +151,10 @@ pub fn show_running_gui() -> Option<bool> {
     if let Ok(st) = crate::store::load::<crate::console::ConsoleState>(&crate::paths::console_file()) {
         ports.push(st.console.port);
     }
-    ports.push(crate::console::ConsoleConf::default().port);
+    // Not in the development mode: a test instance must not find the real gangli of this computer.
+    if crate::paths::dev_override().is_none() {
+        ports.push(crate::console::ConsoleConf::default().port);
+    }
     ports.dedup();
     let mut answer = None;
     for port in ports {
