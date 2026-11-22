@@ -158,10 +158,12 @@ pub async fn apply_relays(ep: &iroh::Endpoint, want: &[String], applied: &mut Ve
             continue;
         }
         let Ok(url) = u.parse::<iroh::RelayUrl>() else { continue };
-        if ep.relay_map().contains(&url) {
+        // A relay the endpoint already had (it started with it) comes back as the previous configuration:
+        // put it back as it was and leave it out of `applied`, so it is never removed.
+        if let Some(prev) = ep.insert_relay(url.clone(), std::sync::Arc::new(iroh::RelayConfig::from(url.clone()))).await {
+            ep.insert_relay(url, prev).await;
             continue;
         }
-        ep.insert_relay(url.clone(), std::sync::Arc::new(iroh::RelayConfig::from(url))).await;
         applied.push(u.clone());
     }
     for u in applied.clone() {
