@@ -43,6 +43,12 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
   `network_relays` without `set` shows a network's extra relays (read scope); with `set` it replaces them
   (`[]`: the n0 relays only) and sends them to the network's machines (admin scope).
 
+  Updates (admin): `{"op": "update", "nodes": ["nas"], "from": "<release folder>"}` sends each machine its
+  binary; `{"op": "self_update", "from": "<new binary or release folder>"}` updates this computer's gangli.
+  Either way the new binary is tried first, the running gangli restarts on it, and the previous one comes
+  back by itself if the new one does not keep running (section 11 of ARCHITECTURE.md). The console's API
+  stops for a few seconds while it restarts.
+
 - `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`: shortcuts for `status`, `nodes`, `info`.
 
 **The state of each machine** is in `nodes` / `info`: `online`, `since` (this session) or `last_seen`, and

@@ -417,14 +417,30 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   an update, and they can already run anything on the machine, so a signature on top would add a key to
   keep and nothing more. Trust in the binary itself is the OS's business (SmartScreen / Gatekeeper ask the
   first time) and the user's.
-- `gangli update [machines…] --from <folder>` (a folder with a release, e.g. `gh release download build-N`):
-  the console picks each machine's binary by platform and architecture (from its inventory) and sends it
-  over the session. The node checks that it is an executable for its own platform and architecture (PE,
-  ELF with the right machine, Mach-O), renames the running binary to `gangli….old`, puts the new one in place
-  and restarts: the service manager starts it again (systemd `Restart=always`, launchd `KeepAlive`, the
-  Windows recovery action set by `install`), a node run by hand starts the new binary itself. The `.old` file
-  is removed at the next start.
-- Not yet: automatic rollback if the new version does not come back.
+- **One convention for every OS and every way gangli runs [decided 2026-11-22]** (service, node by hand,
+  window, `console run`; as SYSTEM / root or as a user): **the new binary goes next to the running one as
+  `<binary>.update`** (`gangli.update`, `gangli.exe.update`). It gets there by hand, by `gangli self-update
+  --from <binary|release folder>` / the API's `self_update` (this computer's gangli), or over a session when
+  a console updates a machine (`gangli update [machines…] --from <release folder>`, the console picking each
+  machine's binary from its inventory). Then:
+  1. *Trial*: a first look (PE, ELF with the right machine, Mach-O), then the candidate is run: `version
+     --json` must answer this OS and architecture within 20 s (a damaged file, the wrong one, an unsigned
+     macOS binary fail here). A failed one is set aside as `<binary>.failed`; nothing changes.
+  2. *Swap*: the running binary becomes `<binary>.rollback` (a running file can be renamed everywhere, not
+     overwritten), the candidate takes its name, dated now, and the process restarts on it: a service exits
+     and its manager starts it again (systemd `Restart=always`, launchd `KeepAlive`, the Windows recovery
+     action set by `install`); anything else starts the new binary with the same arguments (the window as
+     `gangli gui`, without a console window), which first waits for the old process to be gone
+     (`GANGLI_WAIT_PID`: the window's single instance, the node's status port).
+  3. *Probation*: the update is kept once a long-running gangli on it has run 30 s or ended normally
+     (`.rollback` → `<binary>.previous`, the last version, for a rollback by hand). If three minutes after
+     the swap none has (the new binary keeps failing; a service is restarted every 5 s), the next start puts
+     `.rollback` back and the new binary becomes `.failed`.
+  4. *Watch*: each long-running gangli looks every 30 s, on the local disk only (no network: not polling),
+     for a `.update` to apply, or for its binary replaced by another gangli of the same folder (the window
+     updated while the service runs from the same file), and restarts on the new one.
+  A folder the running user cannot write (a service installed in `/opt`, updated from a user's window)
+  stops it with a clear error; the binary stays as it was.
 
 ## 12. GUI, tray, local API, LLM agents
 

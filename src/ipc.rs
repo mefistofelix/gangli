@@ -58,6 +58,8 @@ pub enum IpcOp {
     JobOutput { node: String, job: String, from: Option<u64> },
     JobKill { node: String, job: String },
     Update { nodes: Vec<String>, from: String },
+    /// Update this computer's gangli (the console's binary): `from` a binary or a release folder.
+    SelfUpdate { from: String },
     DebugDrop { node: String },
     /// The GUI window's size and place (points), kept in `gangli.console` for the next start.
     GuiWindow { x: f32, y: f32, w: f32, h: f32 },
@@ -78,7 +80,7 @@ impl IpcOp {
             IpcOp::Exec { .. } | IpcOp::JobStart { .. } | IpcOp::JobList { .. } | IpcOp::JobOutput { .. } | IpcOp::JobKill { .. } => Some("exec"),
             IpcOp::TunnelAdd { .. } | IpcOp::TunnelRemove { .. } | IpcOp::TunnelSet { .. } => Some("admin"),
             // They show passwords.
-            IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } | IpcOp::Update { .. } => Some("admin"),
+            IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } | IpcOp::Update { .. } | IpcOp::SelfUpdate { .. } => Some("admin"),
             // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::SshLoginSet { .. } | IpcOp::Stop => Some("admin"),

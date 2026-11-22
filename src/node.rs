@@ -172,7 +172,6 @@ fn wanted_relays(st: &state::State) -> Vec<String> {
 }
 
 async fn run(stop: Arc<AtomicBool>) -> Result<()> {
-    crate::update::cleanup();
     let sk = state::node_key()?;
     let me = sk.public();
     let conf = state::load()?.node;
@@ -1028,25 +1027,30 @@ where
     R: AsyncRead + Unpin + Send + 'static,
 {
     use tokio::io::AsyncReadExt;
-    let r: Result<Vec<u8>> = async {
+    // Staged next to the binary, tried, swapped (update.rs): the answer says whether it will restart on it.
+    let r: Result<bool> = async {
         if size == 0 || size > 200 << 20 {
             bail!("bad size");
         }
         let mut bytes = vec![0u8; size as usize];
         recv.read_exact(&mut bytes).await.ctx("receive the binary")?;
-        crate::update::check(&bytes, std::env::consts::OS, std::env::consts::ARCH)?;
-        Ok(bytes)
+        log_line("update received");
+        tokio::task::spawn_blocking(move || {
+            crate::update::stage(&bytes)?;
+            crate::update::apply_staged()
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))?
     }
     .await;
     match r {
-        Ok(bytes) => {
+        Ok(swapped) => {
             let _ = proto::write_frame(&mut send, &Resp::Updating).await;
             let _ = tokio::io::AsyncWriteExt::shutdown(&mut send).await;
-            log_line("update received");
-            // Let the answer leave, then swap and restart (does not return on success).
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Err(e) = tokio::task::spawn_blocking(move || crate::update::install_and_restart(&bytes)).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {
-                log_line(&format!("update failed: {e:#}"));
+            if swapped {
+                // Let the answer leave, then restart on the new binary.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                crate::update::restart();
             }
         }
         Err(e) => {

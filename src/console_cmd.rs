@@ -511,6 +511,24 @@ pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `gangli self-update --from <binary or release folder>`: through the open console (which restarts on it),
+/// else here (the gangli of this folder, a service too, restarts on it within 30 s).
+pub fn self_update(from: String, json: bool) -> Result<()> {
+    let from = std::fs::canonicalize(&from).map(|p| p.display().to_string()).unwrap_or(from);
+    let v = ipc::call(IpcOp::SelfUpdate { from })?;
+    if json {
+        print_json(&v);
+    } else if v["updated"].as_bool() == Some(true) {
+        println!(
+            "updated (was {}): the gangli of this folder restarts on the new binary; the previous one is kept and put back if the new one does not keep running",
+            v["version_was"].as_str().unwrap_or("?")
+        );
+    } else {
+        println!("nothing to update");
+    }
+    Ok(())
+}
+
 pub fn term(op: IpcOp, json: bool) -> Result<()> {
     let v = ipc::call(op)?;
     if json {

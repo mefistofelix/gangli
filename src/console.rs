@@ -1228,6 +1228,7 @@ fn api_help(c: &Console) -> Value {
             op("network_add", "admin", json!({ "code": "private code", "name": "optional" }), "add a network owned elsewhere"),
             op("network_codes", "admin", json!({ "name": "network" }), "a network's codes"),
             op("network_remove", "admin", json!({ "name": "network" }), "remove a network from this console"),
+            op("self_update", "admin", json!({ "from": "path of the new gangli binary, or of a folder with the release binaries" }), "update this computer's gangli: the new binary is tried, put in place, gangli restarts on it (the previous one is kept, and put back if the new one does not keep running); dropping it next to gangli as <name>.update does the same"),
             op("network_bundle", "admin", json!({ "names": ["network"] }), "what a gangli executable carries for these networks (public codes, relays); `gangli pack --network` makes one"),
             op("network_relays", "read / admin with set", json!({ "name": "network", "set": "optional list of https:// relay URLs ([] clears)" }), "a network's extra iroh relays (on top of the n0 ones), sent to its machines"),
             op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
@@ -1780,6 +1781,19 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let conn = ensure_live(c, &net, &id).await?;
             proto::request(&conn, &Req::JobKill { id: job.clone() }).await?;
             Ok(json!({ "node": node, "killed": job }))
+        }
+        IpcOp::SelfUpdate { from } => {
+            // Staged, then tried and swapped here; an open console restarts on it right after answering (its
+            // window too), the other gangli of this folder (a service) within 30 s.
+            crate::update::stage_from(std::path::Path::new(&from))?;
+            let swapped = tokio::task::spawn_blocking(crate::update::apply_staged).await.map_err(|e| anyhow!("{e}"))??;
+            if swapped && c.open {
+                tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    crate::update::restart();
+                });
+            }
+            Ok(json!({ "updated": swapped, "restarting": swapped && c.open, "version_was": crate::build_version() }))
         }
         IpcOp::Update { nodes, from } => {
             let dir = std::path::PathBuf::from(&from);

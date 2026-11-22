@@ -174,6 +174,15 @@ enum Command {
         #[arg(long)]
         from: String,
     },
+    /// Update this gangli: a new binary (or a release folder) tried, put in place, the running gangli of this
+    /// folder restarted on it, the previous one kept and put back if the new one does not keep running.
+    /// Dropping the new binary next to this one as `<name>.update` does the same.
+    #[command(name = "self-update")]
+    SelfUpdate {
+        /// The new binary, or a folder with the release binaries.
+        #[arg(long)]
+        from: String,
+    },
     /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
     #[command(hide = true, name = "debug-drop")]
     DebugDrop { node: String },
@@ -405,6 +414,8 @@ fn main() {
     #[cfg(windows)]
     elevate::adopt_elevated_output(&mut args);
     qr::enable_terminal_colours();
+    // Started by an update's restart: let the process it replaces go first.
+    update::wait_for_predecessor();
 
     // Bare version flags before clap so the build number shows (clap's own version flag is disabled).
     if matches!(args.get(1).and_then(|a| a.to_str()), Some("--version") | Some("-V")) {
@@ -417,6 +428,15 @@ fn main() {
     // A binary that carries networks, started where there is no gangli.node yet: it starts with them.
     if let Err(e) = state::seed_from_bundle() {
         eprintln!("gangli: the networks this binary carries were not set up: {e:#}");
+    }
+    // A long-running gangli (window, node, service, `console run`) applies a staged update, keeps an
+    // update on probation, watches for new ones (update.rs); ending normally keeps the update it runs on.
+    let long_running = matches!(
+        cli.command,
+        Some(Command::Gui { .. }) | Some(Command::Node { .. }) | Some(Command::Run { .. }) | Some(Command::Console(ConsoleCmd::Run))
+    ) || (cli.command.is_none() && gui::started_from_desktop());
+    if long_running {
+        update::on_start();
     }
     let result: anyhow::Result<()> = match cli.command {
         None if gui::started_from_desktop() => gui::run(false),
@@ -517,7 +537,11 @@ fn main() {
         },
         Some(Command::Update { nodes, from }) => console_cmd::update(nodes, from, json),
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
+        Some(Command::SelfUpdate { from }) => console_cmd::self_update(from, json),
     };
+    if long_running && result.is_ok() {
+        update::confirm();
+    }
     if let Err(e) = result {
         if json {
             println!("{}", serde_json::json!({ "error": format!("{e:#}") }));

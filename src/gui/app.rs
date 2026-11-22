@@ -45,6 +45,8 @@ enum Modal {
     PairConfirm { offers: Vec<(crate::pair::Offer, bool)> },
     /// Make a gangli executable carrying the ticked networks.
     MakeExe { picks: Vec<(String, bool)> },
+    /// Update this gangli from a binary or a release folder.
+    SelfUpdate { from: String },
     Confirm { text: String, op: IpcOp, done: String },
     /// A network's extra relays, one address per line.
     Relays { network: String, text: String },
@@ -1183,6 +1185,11 @@ impl App {
                 ui.heading("This computer");
                 ui.label(RichText::new(crate::version_line()).weak());
             });
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                if ui.button("Update gangli…").on_hover_text("Put a new gangli in place of this one (and of the service running from this folder)").clicked() {
+                    self.modal = Some(Modal::SelfUpdate { from: String::new() });
+                }
+            });
         });
         ui.add_space(8.0);
         ui.label(RichText::new("Managed from a console (node)").strong());
@@ -1793,6 +1800,16 @@ impl App {
                     ui.add_space(6.0);
                     ui.add(egui::TextEdit::multiline(text).hint_text("https://relay.example.org").desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 }
+                Modal::SelfUpdate { from } => {
+                    ui.heading("Update gangli");
+                    ui.label(format!("Now {}. The new binary, or a folder with the release binaries (`gh release download build-N`):", crate::version_line()));
+                    ui.add(egui::TextEdit::singleline(from).hint_text(if cfg!(windows) { r"C:\Users\me\Downloads\gangli-windows-x86_64.exe" } else { "/home/me/Downloads/gangli-linux-x86_64" }).desired_width(f32::INFINITY));
+                    ui.label(RichText::new(
+                        "It is tried first; then it takes this one's place and gangli restarts on it (the service running from this folder too). \
+                         The previous version is kept, and comes back by itself if the new one does not keep running. Dropping the new binary \
+                         next to this one, named like it plus .update, does the same.",
+                    ).weak());
+                }
                 Modal::MakeExe { picks } => {
                     ui.heading("Create a gangli executable");
                     ui.label("A copy of this gangli with the ticked networks inside (public codes and relays): the first time it runs on a computer without a gangli.node, that computer starts as a node of those networks.");
@@ -1921,6 +1938,15 @@ impl App {
                     let nets: Vec<(String, Vec<String>)> = offers.iter().filter(|(_, on)| *on).map(|(o, _)| (o.code.clone(), vec![])).collect();
                     if ui.add_enabled(!nets.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
                         self.join_codes(nets);
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::SelfUpdate { from } = &m {
+                    if ui.add_enabled(!from.trim().is_empty(), egui::Button::new(RichText::new("Update").strong())).clicked() {
+                        let from = from.trim().trim_matches('"').to_string();
+                        self.call(Tag::Done("Updated: gangli restarts on the new version".into()), IpcOp::SelfUpdate { from });
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {
