@@ -62,6 +62,8 @@ pub enum IpcOp {
     SelfUpdate { from: String },
     /// Look again for a UDP port the router forwards to this computer (a machine outside sends the probes).
     NetProbe,
+    /// A machine's power: mains / battery, sleep and hibernation; changed first with `set`.
+    Power { node: String, #[serde(default)] set: Option<crate::power::PowerSet> },
     /// Restart this gangli (window and console) on the same binary, e.g. to bind the UDP port just found.
     Restart,
     DebugDrop { node: String },
@@ -89,6 +91,8 @@ impl IpcOp {
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::SshLoginSet { .. } | IpcOp::Stop => Some("admin"),
             IpcOp::NetProbe | IpcOp::Restart => Some("admin"),
+            IpcOp::Power { set: None, .. } => Some("read"),
+            IpcOp::Power { .. } => Some("admin"),
             IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } | IpcOp::ApiTokenSet { .. } => None,
         }

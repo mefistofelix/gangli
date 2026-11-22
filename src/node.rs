@@ -672,6 +672,22 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     let _ = send.finish();
                 });
             }
+            Req::Power { set } if authed => {
+                tokio::spawn(async move {
+                    let r = tokio::task::spawn_blocking(move || match set {
+                        Some(s) => crate::power::set(&s),
+                        None => Ok(crate::power::read()),
+                    })
+                    .await;
+                    let resp = match r {
+                        Ok(Ok(power)) => Resp::Power { power },
+                        Ok(Err(e)) => Resp::Error { message: format!("{e:#}") },
+                        Err(e) => Resp::Error { message: e.to_string() },
+                    };
+                    let _ = proto::write_frame(&mut send, &resp).await;
+                    let _ = send.finish();
+                });
+            }
             Req::Update { size } if authed => {
                 tokio::spawn(receive_update(send, recv, size));
             }

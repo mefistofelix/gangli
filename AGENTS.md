@@ -78,6 +78,7 @@ src/proto.rs          wire protocol gangli/2: messages, frames, connect/request 
 src/cert.rs code.rs   certificates; public / private network codes and derived secrets
 src/state.rs store.rs node state (system or user folder); locked owner-only JSON files
 src/inventory.rs      what a node reports (sysinfo)
+src/power.rs          node power: mains / battery, sleep and hibernation timeouts (read and set)
 src/elevate.rs        native elevation (UAC with output relay, osascript, pkexec/sudo)
 src/service/          system service per OS (SCM, launchd, systemd)
 src/gui/              the window: app.rs (egui pages, same everywhere), client.rs (in-process console or the

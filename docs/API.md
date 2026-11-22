@@ -49,6 +49,11 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
   back by itself if the new one does not keep running (section 11 of ARCHITECTURE.md). The console's API
   stops for a few seconds while it restarts.
 
+  Power: `{"op": "power", "node": "nas"}` (read scope) shows whether it is plugged in (`on_ac`), the
+  `battery` charge and its timeouts in minutes (0: never; `_ac` plugged in, `_dc` on battery: `sleep_`,
+  `hibernate_`, `display_`); with `"set": {"sleep_ac": 0, "hibernate_ac": 0}` (admin) it changes them
+  first (Linux: `{"sleep_blocked": true}`). A sleeping machine is offline until someone wakes it.
+
   Network (admin): `{"op": "net_probe"}` looks for a UDP port the router forwards to this computer (a machine
   outside sends the probes; up to a minute) and answers `found` (the port, or null) and `net`; a port found
   is used from the next start, `{"op": "restart"}` restarts gangli now. `status` → `net` shows how this

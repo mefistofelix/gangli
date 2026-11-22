@@ -37,6 +37,8 @@ pub enum Tag {
     CopyPassword,
     /// Gateway login of a machine: copy an ssh command line.
     CopySsh,
+    /// A machine's power settings (target, name): shown in a dialog to change.
+    Power(String, String),
     /// Any other action: on success, show this message.
     Done(String),
     /// Another `gangli` was started in this folder: bring the window up.

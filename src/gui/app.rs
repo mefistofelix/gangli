@@ -63,6 +63,22 @@ enum Modal {
     /// A gateway login rule, new (`index: None`) or rule `index`; keys one per line; an empty password keeps
     /// the old one (a new rule gets a generated one).
     Rule { index: Option<usize>, hosts: String, users: String, password: String, keys: String },
+    /// A machine's sleep and hibernation: as read (`was`) and as edited.
+    Power { node: String, name: String, was: crate::power::Power, edit: crate::power::Power },
+}
+
+/// A sleep / hibernate timeout to pick (minutes, 0 = never); nothing when the machine has no such setting.
+fn minutes_combo(ui: &mut Ui, id: &str, v: &mut Option<u32>) {
+    let Some(cur) = v.as_mut() else {
+        ui.label("");
+        return;
+    };
+    const CHOICES: [u32; 15] = [0, 1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300];
+    egui::ComboBox::from_id_salt(id).selected_text(crate::power::minutes_label(Some(*cur))).width(90.0).show_ui(ui, |ui| {
+        for c in CHOICES.iter().copied().chain((!CHOICES.contains(cur)).then_some(*cur)) {
+            ui.selectable_value(cur, c, crate::power::minutes_label(Some(c)));
+        }
+    });
 }
 
 /// A page's title with its main action (a "New …" button) at the top right; `true` when the action was clicked.
@@ -519,6 +535,15 @@ impl App {
                     ),
                 }
             }
+            Tag::Power(node, name) => match serde_json::from_value::<crate::power::Power>(v["power"].clone()) {
+                Ok(p) => {
+                    if matches!(&self.modal, Some(Modal::Power { node: n, .. }) if *n == node) {
+                        self.toast(format!("Power settings of {name} saved"), false);
+                    }
+                    self.modal = Some(Modal::Power { node, name, was: p.clone(), edit: p });
+                }
+                Err(e) => self.toast(format!("{e}"), true),
+            },
             Tag::CopyPassword => {
                 self.copy = Some(s(&v["password"]).to_string());
                 self.toast("Password copied", false);
@@ -897,6 +922,11 @@ impl App {
             row("Users", inv.users.join(", "));
             let access = if inv.full_access { "full" } else { "this user only" };
             row("Runs as", format!("{} ({access})", inv.service_user));
+            row("Logged in", if inv.logged_in.is_empty() { "nobody".into() } else { inv.logged_in.join(", ") });
+            let power = inv.power_label();
+            if !power.is_empty() {
+                row("Power", power);
+            }
             row("Up for", human_ago(inv.uptime));
             row("gangli", inv.version.clone());
             if let Some(p) = &n.path {
@@ -916,6 +946,15 @@ impl App {
                 row("Its network", inv.net.summary());
             }
         });
+
+        ui.add_space(4.0);
+        if ui
+            .add_enabled(n.online, egui::Button::new("Sleep settings…"))
+            .on_hover_text("When it goes to sleep or hibernates, plugged in and on battery: a machine asleep is offline until someone wakes it")
+            .clicked()
+        {
+            self.call(Tag::Power(tgt.clone(), n.name.clone()), IpcOp::Power { node: tgt.clone(), set: None });
+        }
 
         // Update, forget.
         ui.add_space(8.0);
@@ -1868,6 +1907,44 @@ impl App {
                          next to this one, named like it plus .update, does the same.",
                     ).weak());
                 }
+                Modal::Power { name, edit, .. } => {
+                    ui.heading(format!("Sleep settings of {name}"));
+                    let inv = crate::inventory::Inventory { on_ac: edit.on_ac, battery: edit.battery, ..Default::default() };
+                    let now = inv.power_label();
+                    if !now.is_empty() {
+                        ui.label(format!("Now {now}."));
+                    }
+                    ui.label(RichText::new("A machine asleep or hibernated is offline until someone wakes it. The screen still turns off as set on the machine.").weak());
+                    ui.add_space(6.0);
+                    let battery = edit.battery.is_some() || edit.sleep_dc.is_some();
+                    egui::Grid::new("power").num_columns(3).spacing([16.0, 6.0]).show(ui, |ui| {
+                        ui.label("");
+                        ui.label(RichText::new("Plugged in").strong());
+                        ui.label(RichText::new(if battery { "On battery" } else { "" }).strong());
+                        ui.end_row();
+                        for (what, ac, dc) in [("Sleep", &mut edit.sleep_ac, &mut edit.sleep_dc), ("Hibernate", &mut edit.hibernate_ac, &mut edit.hibernate_dc)] {
+                            if ac.is_none() && dc.is_none() {
+                                continue;
+                            }
+                            ui.label(what);
+                            minutes_combo(ui, &format!("{what}-ac"), ac);
+                            minutes_combo(ui, &format!("{what}-dc"), dc);
+                            ui.end_row();
+                        }
+                        if edit.display_ac.is_some() || edit.display_dc.is_some() {
+                            ui.label(RichText::new("Screen off").weak());
+                            ui.label(RichText::new(crate::power::minutes_label(edit.display_ac)).weak());
+                            ui.label(RichText::new(if battery { crate::power::minutes_label(edit.display_dc) } else { String::new() }).weak());
+                            ui.end_row();
+                        }
+                    });
+                    if let Some(b) = edit.sleep_blocked.as_mut() {
+                        ui.checkbox(b, "Never sleep or hibernate (the whole system)");
+                    }
+                    if !edit.note.is_empty() {
+                        ui.label(RichText::new(edit.note.as_str()).weak());
+                    }
+                }
                 Modal::MakeExe { picks } => {
                     ui.heading("Create a gangli executable");
                     ui.label("A copy of this gangli with the ticked networks inside (public codes and relays): the first time it runs on a computer without a gangli.node, that computer starts as a node of those networks.");
@@ -2008,6 +2085,21 @@ impl App {
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Power { node, name, was, edit } = &m {
+                    let pick = |a: Option<u32>, b: Option<u32>| (a != b).then_some(b).flatten();
+                    let set = crate::power::PowerSet {
+                        sleep_ac: pick(was.sleep_ac, edit.sleep_ac),
+                        sleep_dc: pick(was.sleep_dc, edit.sleep_dc),
+                        hibernate_ac: pick(was.hibernate_ac, edit.hibernate_ac),
+                        hibernate_dc: pick(was.hibernate_dc, edit.hibernate_dc),
+                        sleep_blocked: (was.sleep_blocked != edit.sleep_blocked).then_some(edit.sleep_blocked).flatten(),
+                    };
+                    if ui.add_enabled(!set.is_empty(), egui::Button::new(RichText::new("Save").strong())).clicked() {
+                        self.call(Tag::Power(node.clone(), name.clone()), IpcOp::Power { node: node.clone(), set: Some(set) });
+                    }
+                    if ui.button("Close").clicked() {
                         keep = false;
                     }
                 } else if let Modal::MakeExe { picks } = &m {

@@ -513,6 +513,41 @@ pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
 
 /// `gangli self-update --from <binary or release folder>`: through the open console (which restarts on it),
 /// else here (the gangli of this folder, a service too, restarts on it within 30 s).
+/// `gangli power NODE [--sleep-ac MIN …]`.
+pub fn power(node: String, set: crate::power::PowerSet, json: bool) -> Result<()> {
+    let changing = !set.is_empty();
+    let v = ipc::call(IpcOp::Power { node, set: changing.then_some(set) })?;
+    if json {
+        print_json(&v);
+        return Ok(());
+    }
+    let p: crate::power::Power = serde_json::from_value(v["power"].clone())?;
+    let inv = crate::inventory::Inventory { on_ac: p.on_ac, battery: p.battery, ..Default::default() };
+    let label = crate::power::minutes_label;
+    println!("{}{}", s_or(&inv.power_label(), "power source unknown"), if changing { " (changed)" } else { "" });
+    println!("{:<12} {:>12} {:>12}", "", "plugged in", "on battery");
+    for (what, ac, dc) in [("sleep", p.sleep_ac, p.sleep_dc), ("hibernate", p.hibernate_ac, p.hibernate_dc), ("screen off", p.display_ac, p.display_dc)] {
+        if ac.is_some() || dc.is_some() {
+            println!("{what:<12} {:>12} {:>12}", label(ac), label(dc));
+        }
+    }
+    if let Some(b) = p.sleep_blocked {
+        println!("sleep and hibernation: {}", if b { "off for the whole system" } else { "allowed" });
+    }
+    if !p.note.is_empty() {
+        println!("{}", p.note);
+    }
+    Ok(())
+}
+
+fn s_or(s: &str, or: &str) -> String {
+    if s.is_empty() {
+        or.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// `gangli net [--probe]`.
 pub fn net(probe: bool, json: bool) -> Result<()> {
     let v = ipc::call(if probe { IpcOp::NetProbe } else { IpcOp::Status })?;

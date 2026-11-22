@@ -365,7 +365,18 @@ Always on **[decided]**: every node is a hop into its LAN.
 
 Per node: name, hostname, OS and version, arch, LAN IPs, link (direct / relay, RTT, remote address), RAM, disks,
 CPU, uptime, local users, the account the service runs as ("full access" when root / SYSTEM), gangli
-version, online since / last seen. Crate `sysinfo`, local users from `/etc/passwd` on Linux.
+version, online since / last seen. Crate `sysinfo`, local users from `/etc/passwd` on Linux. Also who is
+logged in now (`proc::logged_in`: Windows sessions, the macOS console user, Linux login sessions), plugged
+in or on battery and the charge (`power::source`; the charge counts for a push only by fifths), and how it
+reaches the Internet (section 4).
+
+**Power [decided 2026-11-22]**: a managed machine that sleeps or hibernates is offline until someone wakes
+it (seen on the aunt's laptop: S3 sleep). The owner reads and sets a machine's sleep and hibernation
+timeouts, plugged in and on battery, from a console (machine details → *Sleep settings…*, `gangli power NODE
+--sleep-ac 0`, API `power`; `Req::Power`). The screen's timeout is shown and never changed: the screen still
+turns off. Windows: the active power plan through the power API (powrprof, no external program); macOS:
+`pmset` (sleep only, hibernation follows it); Linux: sleep is on or off for the whole system (systemd's
+sleep targets masked), the idle timeouts belong to the desktop. Changing them needs the service.
 
 Names: the admitting console names nodes (slug of the hostname, unique per network, written in their certificate); addressing is `name` or
 `name.network` when ambiguous.

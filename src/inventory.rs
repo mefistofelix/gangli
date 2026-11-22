@@ -36,6 +36,14 @@ pub struct Inventory {
     /// How it reaches the Internet (what decides whether links with it can be direct).
     #[serde(default)]
     pub net: NetInfo,
+    /// Runs on mains now (`None`: unknown) and the battery's charge in percent (`None`: no battery).
+    #[serde(default)]
+    pub on_ac: Option<bool>,
+    #[serde(default)]
+    pub battery: Option<u8>,
+    /// Who is logged in now (Windows: a session not connected to the screen is marked "(disconnected)").
+    #[serde(default)]
+    pub logged_in: Vec<String>,
 }
 
 /// How a gangli reaches the Internet, as iroh measured it through the relays.
@@ -92,12 +100,28 @@ impl Inventory {
             self.relay,
             // what can change a link (not the public ports, which NATs move around)
             self.net.udp_v4, self.net.udp_v6, self.net.nat_varies, self.net.public_v6.is_empty(),
-            self.net.public_v4.rsplit_once(':').map(|(ip, _)| ip)
+            self.net.public_v4.rsplit_once(':').map(|(ip, _)| ip),
+            // plugged in or not, who is there; the charge only by fifths (and below 10 %), not every percent
+            self.on_ac, self.logged_in, self.battery.map(|b| if b < 10 { 0 } else { 1 + b / 20 })
         ])
         .to_string()
     }
 
     /// "Windows 11 Home", "Ubuntu 24.04 LTS", "macOS 15.1": the OS name without repeating it.
+    /// "plugged in", "on battery, 63 %", "plugged in, 100 %"; empty when unknown.
+    pub fn power_label(&self) -> String {
+        let src = match self.on_ac {
+            Some(true) => "plugged in",
+            Some(false) => "on battery",
+            None if self.battery.is_some() => "battery",
+            None => return String::new(),
+        };
+        match self.battery {
+            Some(b) => format!("{src}, {b} %"),
+            None => src.to_string(),
+        }
+    }
+
     pub fn os_label(&self) -> String {
         let v = self.os_version.trim();
         // sysinfo says "Darwin" for the system and "macOS 15.1 Sequoia" for the version.
@@ -157,8 +181,10 @@ pub fn collect() -> Inventory {
         full_access: crate::elevate::is_root(),
         service_user: service_user(),
         users: local_users(),
+        logged_in: crate::proc::logged_in(),
         ..Default::default()
     };
+    (inv.on_ac, inv.battery) = crate::power::source();
     if inv.hostname.is_empty() {
         inv.hostname = std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))

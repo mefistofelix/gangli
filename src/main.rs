@@ -16,6 +16,7 @@ mod node;
 mod node_cmd;
 mod pair;
 mod paths;
+mod power;
 mod proc;
 mod proto;
 mod qr;
@@ -182,6 +183,26 @@ enum Command {
         /// The new binary, or a folder with the release binaries.
         #[arg(long)]
         from: String,
+    },
+    /// A machine's power: plugged in or on battery, sleep and hibernation (minutes, 0 = never). The screen's
+    /// timeout is shown, never changed.
+    Power {
+        node: String,
+        /// Sleep after this many minutes when plugged in (0: never).
+        #[arg(long)]
+        sleep_ac: Option<u32>,
+        /// Sleep after this many minutes on battery (0: never).
+        #[arg(long)]
+        sleep_battery: Option<u32>,
+        /// Hibernate after this many minutes when plugged in (0: never; Windows).
+        #[arg(long)]
+        hibernate_ac: Option<u32>,
+        /// Hibernate after this many minutes on battery (0: never; Windows).
+        #[arg(long)]
+        hibernate_battery: Option<u32>,
+        /// Linux: turn sleep and hibernation off (true) or on (false) for the whole system.
+        #[arg(long)]
+        sleep_blocked: Option<bool>,
     },
     /// This console's network: public addresses, NAT, the UDP port (and whether the router forwards one).
     Net {
@@ -545,6 +566,10 @@ fn main() {
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
         Some(Command::SelfUpdate { from }) => console_cmd::self_update(from, json),
         Some(Command::Net { probe }) => console_cmd::net(probe, json),
+        Some(Command::Power { node, sleep_ac, sleep_battery, hibernate_ac, hibernate_battery, sleep_blocked }) => {
+            let set = power::PowerSet { sleep_ac, sleep_dc: sleep_battery, hibernate_ac, hibernate_dc: hibernate_battery, sleep_blocked };
+            console_cmd::power(node, set, json)
+        }
     };
     if long_running && result.is_ok() {
         update::confirm();

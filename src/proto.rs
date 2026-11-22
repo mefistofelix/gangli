@@ -186,6 +186,8 @@ pub enum Req {
     /// Console → node: send one UDP datagram holding `token` to each of `ports` of `ip` (the console's public
     /// IPv4), paced, to find a port its router forwards to it. At most [`PROBE_MAX`] ports a request.
     ProbeUdp { ip: String, ports: Vec<u16>, token: String },
+    /// Console → node: its power (mains / battery, sleep and hibernation), changed first with `set`.
+    Power { #[serde(default)] set: Option<crate::power::PowerSet> },
     /// Console → node, inside a `Stream`: attach to the persistent terminal `name` (started if missing).
     Attach { name: String, user: String, cols: u16, rows: u16 },
     TermList,
@@ -214,6 +216,7 @@ pub enum Resp {
     Updating,
     /// The probe datagrams went out.
     Probed { sent: u32 },
+    Power { power: crate::power::Power },
     Terms { terms: Vec<TermInfo> },
     Job { id: String },
     Jobs { jobs: Vec<JobInfo> },

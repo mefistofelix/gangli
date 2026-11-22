@@ -44,6 +44,12 @@ pub fn spawn(spec: &Spec) -> Result<Child> {
     imp::spawn(spec)
 }
 
+/// Who is logged in now, for the inventory: Windows its sessions (one not on the screen marked
+/// "(disconnected)"), macOS the console user, Linux the users with a login session.
+pub fn logged_in() -> Vec<String> {
+    imp::logged_in()
+}
+
 fn reader_thread(mut r: impl std::io::Read + Send + 'static, tx: tokio::sync::mpsc::UnboundedSender<Out>, err: bool) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 16384];
@@ -152,6 +158,21 @@ mod imp {
             uids.sort();
             let uid = uids.first().copied().ok_or_else(|| anyhow!("nobody is logged in at the desktop"))?;
             name_of_uid(uid).ok_or_else(|| anyhow!("unknown desktop user"))
+        }
+    }
+
+    pub fn logged_in() -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        {
+            desktop_user().map(|u| vec![u]).unwrap_or_default()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut uids: Vec<u32> = std::fs::read_dir("/run/user")
+                .map(|rd| rd.flatten().filter_map(|e| e.file_name().to_string_lossy().parse().ok()).filter(|u| *u >= 1000).collect())
+                .unwrap_or_default();
+            uids.sort();
+            uids.into_iter().filter_map(name_of_uid).collect()
         }
     }
 
@@ -438,6 +459,19 @@ mod imp {
 
     fn me() -> String {
         std::env::var("USERNAME").unwrap_or_default()
+    }
+
+    pub fn logged_in() -> Vec<String> {
+        let mut list = sessions();
+        list.sort_by_key(|(_, _, active)| !*active);
+        let mut out: Vec<String> = vec![];
+        for (_, u, active) in list {
+            let label = if active { u.clone() } else { format!("{u} (disconnected)") };
+            if !out.iter().any(|x| x == &u || x == &label) {
+                out.push(label);
+            }
+        }
+        out
     }
 
     /// The session token for `user` (`desktop`: the active console session), or `None` for "as this process".
