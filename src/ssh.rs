@@ -435,8 +435,22 @@ async fn bridge(
                 }
             }
         });
+        // While the stream waits for the machine (it resumes by itself when the machine is back), say so.
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        let mut away = false;
         let exit = loop {
             tokio::select! {
+                _ = tick.tick(), if spec.interactive() => {
+                    let gone = c.link(node).is_none();
+                    if gone && !away {
+                        say("the machine is not reachable: this session goes on when it is back".into()).await;
+                        waiting_said = true;
+                    } else if !gone && away {
+                        say("the machine is back".into()).await;
+                        waiting_said = false;
+                    }
+                    away = gone;
+                }
                 m = rx.recv() => {
                     let Some(m) = m else {
                         reader.abort();

@@ -66,7 +66,7 @@ enum Command {
         #[arg(long)]
         hidden: bool,
     },
-    /// node: run the node now as this user, no install (uses the embedded public code by default).
+    /// node: run the node now as this user, no install (joins the networks the binary carries, if any).
     Node {
         /// Public network code.
         #[arg(long)]
@@ -74,7 +74,7 @@ enum Command {
     },
     /// node: install the node as a system service, started at boot, full access (one elevation prompt).
     Install {
-        /// Public network code; default: the one embedded in the binary, if any.
+        /// Public network code; default: the networks the binary carries, if any.
         #[arg(long)]
         code: Option<String>,
         /// Run the service as this account instead of SYSTEM / root (sessions only as that user).
@@ -177,11 +177,14 @@ enum Command {
     /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
     #[command(hide = true, name = "debug-drop")]
     DebugDrop { node: String },
-    /// Copy a gangli binary with a public code embedded: running it is enough to become a node.
+    /// Copy a gangli binary carrying networks (public codes and relays): running it is enough to become a node.
     Pack {
-        /// Public network code to embed.
-        #[arg(long)]
-        code: String,
+        /// A network of this console to carry, with its relays (repeat for more).
+        #[arg(long = "network")]
+        networks: Vec<String>,
+        /// A public network code to carry (repeat for more).
+        #[arg(long = "code")]
+        codes: Vec<String>,
         /// Binary to copy (default: this one); e.g. a release for another OS.
         #[arg(long)]
         from: Option<std::path::PathBuf>,
@@ -367,22 +370,30 @@ fn io_err(e: std::io::Error) -> anyhow::Error {
     anyhow::anyhow!("{e}")
 }
 
-fn pack(code_s: &str, from: Option<std::path::PathBuf>, out: &std::path::Path, json: bool) -> anyhow::Result<()> {
-    let code::Code::Public { .. } = code::decode(code_s)? else {
-        anyhow::bail!("only a public code can be embedded (never the private one)");
-    };
+/// `gangli pack`: a copy of a binary carrying networks: this console's (`--network`, with their relays) and
+/// public codes given as they are (`--code`).
+fn pack(networks: Vec<String>, codes: Vec<String>, from: Option<std::path::PathBuf>, out: &std::path::Path, json: bool) -> anyhow::Result<()> {
+    let mut bundle = embed::Bundle::default();
+    if !networks.is_empty() {
+        let v = ipc::call(ipc::IpcOp::NetworkBundle { names: networks })?;
+        bundle = serde_json::from_value(v)?;
+    }
+    for c in codes {
+        bundle.networks.push(embed::BundledNet { code: c.trim().to_string(), name: String::new(), relays: vec![] });
+    }
     let from = match from {
         Some(p) => p,
         None => std::env::current_exe()?,
     };
-    embed::pack(&from, out, code_s.trim())?;
+    embed::pack(&from, out, &bundle)?;
     let macho = embed::is_macho(out);
+    let names: Vec<String> = bundle.networks.iter().map(|n| if n.name.is_empty() { n.code[..8].to_string() } else { n.name.clone() }).collect();
     if json {
-        println!("{}", serde_json::json!({ "packed": out, "needs_signing": macho }));
+        println!("{}", serde_json::json!({ "packed": out, "networks": names, "needs_signing": macho }));
     } else {
-        println!("{} ready: running it makes the machine a node", out.display());
+        println!("{} ready: running it makes the machine a node of {}", out.display(), names.join(", "));
         if macho {
-            println!("macOS binary: sign it again on a Mac (`codesign -s - {}`), or ship the original with a gangli.code file next to it", out.display());
+            println!("macOS binary: sign it again on a Mac (`codesign -s - {}`), or ship the original with a gangli.networks file next to it", out.display());
         }
     }
     Ok(())
@@ -408,8 +419,9 @@ fn main() {
         Some(Command::Gui { hidden }) => gui::run(hidden),
         None => {
             println!("{}", version_line());
-            if embed::embedded_code().is_some() {
-                println!("this binary carries a network code: `gangli node` to start, `gangli install` to install");
+            if let Some(b) = embed::bundled() {
+                let names: Vec<&str> = b.networks.iter().map(|n| n.name.as_str()).collect();
+                println!("this binary carries networks ({}): `gangli node` to start, `gangli install` to install", names.join(", "));
             }
             println!("`gangli gui` opens the window; `gangli --help` lists the commands");
             Ok(())
@@ -424,7 +436,6 @@ fn main() {
         }
         Some(Command::Node { code }) => node_cmd::run(code),
         Some(Command::Install { code, user, password }) => {
-            let code = code.or_else(embed::embedded_code);
             match code.as_deref().map(code::decode) {
                 Some(Err(e)) => Err(e),
                 Some(Ok(code::Code::Private { .. })) => Err(anyhow::anyhow!("that is a private code: never put it on a managed machine")),
@@ -479,12 +490,12 @@ fn main() {
             },
             json,
         ),
-        Some(Command::Pack { code, from, out }) => pack(&code, from, &out, json),
+        Some(Command::Pack { networks, codes, from, out }) => pack(networks, codes, from, &out, json),
         Some(Command::Ssh(s)) => console_cmd::ssh(
             match s {
                 SshCmd::Status => ipc::IpcOp::SshStatus,
                 SshCmd::Password { node, user } => ipc::IpcOp::SshPassword { node, user },
-                SshCmd::Login(LoginCmd::Add { hosts, users, password, key }) => ipc::IpcOp::SshLoginAdd { hosts, users, password, key },
+                SshCmd::Login(LoginCmd::Add { hosts, users, password, key }) => ipc::IpcOp::SshLoginAdd { hosts, users, password, key, keys: vec![] },
                 SshCmd::Login(LoginCmd::Remove { index }) => ipc::IpcOp::SshLoginRemove { index },
             },
             json,

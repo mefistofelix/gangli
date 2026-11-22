@@ -43,6 +43,10 @@ enum Modal {
     Pair { url: String, answer: Arc<Mutex<Option<Result<Vec<crate::pair::Offer>, String>>>>, cancel: Arc<AtomicBool> },
     /// The phone sent these networks: the person at this computer confirms (and may untick some).
     PairConfirm { offers: Vec<(crate::pair::Offer, bool)> },
+    /// This binary carries networks this computer is not in yet: join them?
+    Carried { nets: Vec<(crate::embed::BundledNet, bool)> },
+    /// Make a gangli executable carrying the ticked networks.
+    MakeExe { picks: Vec<(String, bool)> },
     Confirm { text: String, op: IpcOp, done: String },
     /// A network's extra relays, one address per line.
     Relays { network: String, text: String },
@@ -52,6 +56,28 @@ enum Modal {
     NewNetwork { add: bool, name: String, code: String },
     /// A new API token: who uses it, its scope.
     NewToken { name: String, scope: String },
+    /// An API token: its value and instructions (to copy), its name and scope (to change).
+    TokenEdit { name: String, new_name: String, scope: String, token: String, instructions: String },
+    /// A tunnel, new (`editing: None`) or the one named `editing`.
+    Tunnel { editing: Option<String>, node: String, target: String, listen: String, name: String },
+    /// A gateway login rule, new (`index: None`) or rule `index`; keys one per line; an empty password keeps
+    /// the old one (a new rule gets a generated one).
+    Rule { index: Option<usize>, hosts: String, users: String, password: String, keys: String },
+}
+
+/// A page's title with its main action (a "New …" button) at the top right; `true` when the action was clicked.
+/// Every page puts its actions above its list.
+fn page_header(ui: &mut Ui, title: &str, action: Option<&str>) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.heading(title);
+        if let Some(a) = action {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                clicked = ui.button(RichText::new(a).strong()).clicked();
+            });
+        }
+    });
+    clicked
 }
 
 /// `https://relay.example.org/` (or iroh's fully qualified `…org./`) → `relay.example.org`.
@@ -71,13 +97,8 @@ struct Forms {
     user: String,
     term: String,
     tun_name: String,
-    tun_node: String,
     tun_target: String,
     tun_listen: String,
-    rule_hosts: String,
-    rule_users: String,
-    rule_password: String,
-    rule_key: String,
     update_from: String,
     node_code: String,
     show_passwords: bool,
@@ -232,8 +253,7 @@ fn run_gangli(exe: Option<PathBuf>, args: Vec<String>, out: Arc<Mutex<Option<Str
 
 impl App {
     pub fn new(client: Client) -> App {
-        let mut f = Forms::default();
-        f.node_code = crate::embed::embedded_code().unwrap_or_default();
+        let f = Forms::default();
         let mut app = App {
             client,
             page: Page::Machines,
@@ -265,11 +285,15 @@ impl App {
         if !app.node.installed && !app.node.networks.is_empty() && crate::state::load().is_ok_and(|s| s.node.window_node) {
             app.start_window_node();
         }
-        // A binary made for a relative (with an embedded code), or a computer with no network yet: start on
-        // "This computer".
+        // A binary made for a relative (it carries networks), or a computer with no network yet: start on
+        // "This computer", asking to join what the binary carries.
+        let carried = crate::embed::not_joined();
         let consoles_networks = crate::console::load_state().map(|s| s.networks.len()).unwrap_or(0);
-        if consoles_networks == 0 && (crate::embed::embedded_code().is_some() || !app.node.networks.is_empty() || app.node.installed) {
+        if consoles_networks == 0 && (!carried.is_empty() || !app.node.networks.is_empty() || app.node.installed) {
             app.page = Page::Computer;
+        }
+        if !carried.is_empty() {
+            app.modal = Some(Modal::Carried { nets: carried.into_iter().map(|n| (n, true)).collect() });
         }
         // For screenshots in tests.
         app.page = match std::env::var("GANGLI_GUI_PAGE").unwrap_or_default().as_str() {
@@ -451,6 +475,31 @@ impl App {
             Tag::Token => {
                 self.modal = Some(Modal::Token { name: s(&v["name"]).into(), token: s(&v["token"]).into(), url: s(&v["url"]).into(), instructions: s(&v["instructions"]).into() });
                 self.call(Tag::Api, IpcOp::ApiStatus);
+            }
+            Tag::Bundle => {
+                let r = serde_json::from_value::<crate::embed::Bundle>(v).map_err(anyhow::Error::from).and_then(|b| {
+                    let slug: Vec<String> = b.networks.iter().map(|n| crate::util::slug(&n.name)).collect();
+                    let ext = if cfg!(windows) { ".exe" } else { "" };
+                    let out = exe_dir().join(format!("gangli-{}{ext}", slug.join("-")));
+                    crate::embed::pack(&std::env::current_exe()?, &out, &b)?;
+                    Ok(out)
+                });
+                match r {
+                    Ok(out) => {
+                        self.toast(format!("ready: {}", out.display()), false);
+                        reveal(&out);
+                    }
+                    Err(e) => self.toast(format!("{e:#}"), true),
+                }
+            }
+            Tag::TokenView => {
+                self.modal = Some(Modal::TokenEdit {
+                    name: s(&v["name"]).into(),
+                    new_name: s(&v["name"]).into(),
+                    scope: s(&v["scope"]).into(),
+                    token: s(&v["token"]).into(),
+                    instructions: s(&v["instructions"]).into(),
+                });
             }
             Tag::CopyField(field) => {
                 self.copy = Some(s(&v[field]).to_string());
@@ -809,12 +858,6 @@ impl App {
         ui.add_space(8.0);
         ui.label(RichText::new("Tunnels").strong());
         let mine: Vec<Value> = self.tunnels.iter().filter(|t| s(&t["node"]) == tgt || s(&t["node"]) == n.name).cloned().collect();
-        for t in &mine {
-            ui.horizontal(|ui| {
-                dot(ui, if t["active"].as_bool() == Some(true) { GREEN } else { GREY });
-                ui.label(RichText::new(format!("{} → {}", s(&t["listen"]), s(&t["target"]))).monospace());
-            });
-        }
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text("their address, e.g. 192.168.1.20:80").desired_width(200.0));
             ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text("local port").desired_width(80.0));
@@ -822,6 +865,12 @@ impl App {
                 self.add_tunnel(tgt.clone(), n.name.clone());
             }
         });
+        for t in &mine {
+            ui.horizontal(|ui| {
+                dot(ui, if t["active"].as_bool() == Some(true) { GREEN } else { GREY });
+                ui.label(RichText::new(format!("{} → {}", s(&t["listen"]), s(&t["target"]))).monospace());
+            });
+        }
 
         // What the machine is.
         ui.add_space(8.0);
@@ -899,11 +948,20 @@ impl App {
     // ----- Networks -----
 
     fn networks(&mut self, ui: &mut Ui) {
+        let names: Vec<String> = self.status["networks"].as_array().map(|a| a.iter().map(|n| s(&n["name"]).to_string()).collect()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.heading("Networks");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button(RichText::new("New network…").strong()).clicked() {
                     self.modal = Some(Modal::NewNetwork { add: false, name: String::new(), code: String::new() });
+                }
+                if ui
+                    .add_enabled(!names.is_empty(), egui::Button::new("Create gangli executable…"))
+                    .on_hover_text("A copy of gangli carrying networks: whoever runs it joins them (no code to type)")
+                    .clicked()
+                {
+                    let one = names.len() == 1;
+                    self.modal = Some(Modal::MakeExe { picks: names.iter().map(|n| (n.clone(), one)).collect() });
                 }
             });
         });
@@ -951,11 +1009,16 @@ impl App {
     // ----- Tunnels -----
 
     fn tunnels_page(&mut self, ui: &mut Ui) {
-        ui.heading("Tunnels");
+        if page_header(ui, "Tunnels", Some("New tunnel…")) {
+            let node = self.nodes.first().map(target).unwrap_or_default();
+            self.modal = Some(Modal::Tunnel { editing: None, node, target: String::new(), listen: String::new(), name: String::new() });
+        }
         ui.label(RichText::new("A local port that reaches an address on a machine's network; saved, and back by itself while gangli is open.").weak());
         ui.add_space(8.0);
         let tunnels = self.tunnels.clone();
-        if !tunnels.is_empty() {
+        if tunnels.is_empty() {
+            ui.label(RichText::new("No tunnel yet: New tunnel… makes one.").weak());
+        } else {
             egui::Grid::new("tunnels").striped(true).num_columns(6).spacing([14.0, 8.0]).show(ui, |ui| {
                 for h in ["On", "Name", "Machine", "Local", "Their address", ""] {
                     ui.label(RichText::new(h).strong());
@@ -974,38 +1037,33 @@ impl App {
                     ui.label(s(&t["node"]));
                     ui.label(RichText::new(s(&t["listen"])).monospace());
                     ui.label(RichText::new(s(&t["target"])).monospace());
-                    if ui.small_button("remove").clicked() {
-                        self.call(Tag::Done(format!("tunnel {name} removed")), IpcOp::TunnelRemove { name: name.clone() });
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Edit").clicked() {
+                            let listen = s(&t["listen"]).trim_start_matches("127.0.0.1:").to_string();
+                            self.modal = Some(Modal::Tunnel {
+                                editing: Some(name.clone()),
+                                node: s(&t["node"]).to_string(),
+                                target: s(&t["target"]).to_string(),
+                                listen,
+                                name: name.clone(),
+                            });
+                        }
+                        if ui.small_button(RichText::new("Remove").color(RED)).clicked() {
+                            self.call(Tag::Done(format!("tunnel {name} removed")), IpcOp::TunnelRemove { name: name.clone() });
+                        }
+                    });
                     ui.end_row();
                 }
             });
         }
-        ui.add_space(10.0);
-        ui.label(RichText::new("New tunnel").strong());
-        ui.horizontal_wrapped(|ui| {
-            let names: Vec<(String, String)> = self.nodes.iter().map(|n| (target(n), n.name.clone())).collect();
-            let shown = names.iter().find(|(t, _)| *t == self.f.tun_node).map(|(_, n)| n.clone()).unwrap_or_else(|| "machine".into());
-            egui::ComboBox::from_id_salt("tun_node").selected_text(shown).show_ui(ui, |ui| {
-                for (t, n) in &names {
-                    ui.selectable_value(&mut self.f.tun_node, t.clone(), n);
-                }
-            });
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_target).hint_text("their address host:port").desired_width(200.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_listen).hint_text("local port").desired_width(90.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.tun_name).hint_text("name (optional)").desired_width(130.0));
-            if ui.add_enabled(!self.f.tun_node.is_empty(), egui::Button::new("Add")).clicked() {
-                let node = self.f.tun_node.clone();
-                let name = names.iter().find(|(t, _)| *t == node).map(|(_, n)| n.clone()).unwrap_or_default();
-                self.add_tunnel(node, name);
-            }
-        });
     }
 
     // ----- SSH -----
 
     fn ssh_page(&mut self, ui: &mut Ui) {
-        ui.heading("SSH gateway");
+        if page_header(ui, "SSH gateway", Some("New rule…")) {
+            self.modal = Some(Modal::Rule { index: None, hosts: "*".into(), users: "*".into(), password: String::new(), keys: String::new() });
+        }
         let listen = s(&self.ssh["listen"]).to_string();
         ui.label(format!("Any SSH client reaches the machines at {listen} with the login user+machine (e.g. root+nas)."));
         ui.add_space(8.0);
@@ -1034,35 +1092,23 @@ impl App {
                         self.toast("Password copied", false);
                     }
                 });
+                let keys: Vec<String> = r["key_list"].as_array().map(|a| a.iter().map(|k| s(k).to_string()).collect()).unwrap_or_default();
                 ui.label(r["keys"].to_string());
-                if ui.small_button("remove").clicked() {
-                    self.call(Tag::Done("Rule removed".into()), IpcOp::SshLoginRemove { index });
-                }
+                ui.horizontal(|ui| {
+                    if ui.small_button("Edit").clicked() {
+                        self.modal = Some(Modal::Rule {
+                            index: Some(index),
+                            hosts: list(&r["hosts"]),
+                            users: list(&r["users"]),
+                            password: String::new(),
+                            keys: keys.join("\n"),
+                        });
+                    }
+                    if ui.small_button(RichText::new("Remove").color(RED)).clicked() {
+                        self.call(Tag::Done("Rule removed".into()), IpcOp::SshLoginRemove { index });
+                    }
+                });
                 ui.end_row();
-            }
-        });
-        ui.add_space(8.0);
-        ui.label(RichText::new("New rule").strong());
-        ui.horizontal_wrapped(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_hosts).hint_text("machines (comma), * = all").desired_width(180.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_users).hint_text("users (comma), * = all").desired_width(160.0));
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_password).hint_text("password (empty: generated)").desired_width(170.0));
-        });
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.rule_key).hint_text("public key ssh-ed25519 AAAA… (optional)").desired_width(420.0));
-            if ui.button("Add").clicked() {
-                let split = |s: &str| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
-                let op = IpcOp::SshLoginAdd {
-                    hosts: split(&self.f.rule_hosts),
-                    users: split(&self.f.rule_users),
-                    password: (!self.f.rule_password.trim().is_empty()).then(|| self.f.rule_password.trim().to_string()),
-                    key: (!self.f.rule_key.trim().is_empty()).then(|| self.f.rule_key.trim().to_string()),
-                };
-                self.call(Tag::Done("Rule added".into()), op);
-                self.f.rule_hosts.clear();
-                self.f.rule_users.clear();
-                self.f.rule_password.clear();
-                self.f.rule_key.clear();
             }
         });
         ui.add_space(10.0);
@@ -1079,14 +1125,9 @@ impl App {
     // ----- API -----
 
     fn api_page(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("API for programs and AI agents");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(RichText::new("New token…").strong()).clicked() {
-                    self.modal = Some(Modal::NewToken { name: String::new(), scope: "admin".into() });
-                }
-            });
-        });
+        if page_header(ui, "API for programs and AI agents", Some("New token…")) {
+            self.modal = Some(Modal::NewToken { name: String::new(), scope: "admin".into() });
+        }
         ui.label(RichText::new("A local HTTP API (127.0.0.1 only) while gangli is open. Each program gets its own token, which you can revoke.").weak());
         ui.add_space(8.0);
         let mut on = self.api["enabled"].as_bool() == Some(true);
@@ -1113,6 +1154,9 @@ impl App {
                 ui.label(s(&t["scope"]));
                 ui.label(format!("{} ago", human_ago(now().saturating_sub(t["created"].as_u64().unwrap_or(0)))));
                 ui.horizontal(|ui| {
+                    if ui.small_button("View / edit").clicked() {
+                        self.call(Tag::TokenView, IpcOp::ApiTokenShow { name: name.clone() });
+                    }
                     if ui.small_button("Copy token").clicked() {
                         self.call(Tag::CopyField("token"), IpcOp::ApiTokenShow { name: name.clone() });
                     }
@@ -1149,7 +1193,6 @@ impl App {
         ui.add_space(8.0);
         ui.label(RichText::new("Managed from a console (node)").strong());
         let busy = self.node.job.is_some();
-        self.node_networks(ui, busy);
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!busy, egui::Button::new(RichText::new("Pair with your phone…").strong()))
@@ -1161,10 +1204,12 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.f.node_code).hint_text("or a public code (the longer one)").desired_width(300.0));
             if ui.add_enabled(!busy && !self.f.node_code.trim().is_empty(), egui::Button::new("Join")).clicked() {
                 let code = self.f.node_code.trim().to_string();
-                self.join_codes(vec![code]);
+                self.join_codes(vec![(code, vec![])]);
                 self.f.node_code.clear();
             }
         });
+        ui.add_space(4.0);
+        self.node_networks(ui, busy);
 
         // How the node runs: one choice, gangli does the rest (stop, install, uninstall, start).
         ui.add_space(8.0);
@@ -1437,20 +1482,22 @@ impl App {
 
     /// Join these networks and make sure the node runs: the service gets them (one system prompt), else the
     /// node starts in this window.
-    fn join_codes(&mut self, codes: Vec<String>) {
-        if codes.is_empty() {
+    /// Each network: its public code and the extra relays it comes with (a carried network's; the service
+    /// gets those from a console once admitted).
+    fn join_codes(&mut self, nets: Vec<(String, Vec<String>)>) {
+        if nets.is_empty() {
             return;
         }
         if self.node.installed {
             let mut args = vec!["join".to_string()];
-            args.extend(codes);
+            args.extend(nets.into_iter().map(|(c, _)| c));
             self.start_job(self.node.installed_at.clone(), args);
             self.toast("Confirm the system's request: the service joins the networks", false);
             return;
         }
         let mut joined = vec![];
-        for c in &codes {
-            match crate::state::add_join(c) {
+        for (c, relays) in &nets {
+            match crate::state::add_join_with(c, relays) {
                 Ok(name) => joined.push(name),
                 Err(e) => self.toast(format!("{e:#}"), true),
             }
@@ -1600,22 +1647,9 @@ impl App {
                     ui.add_space(6.0);
                     ui.label(RichText::new("Public code: for the machines to manage").strong());
                     ui.add(egui::Label::new(RichText::new(public.as_str()).monospace()).wrap());
-                    ui.horizontal(|ui| {
-                        if ui.button("Copy").clicked() {
-                            self.copy = Some(public.clone());
-                        }
-                        if ui.button("Prepare a gangli with it…").on_hover_text("A copy of this program that joins the network by itself: send it to whoever needs help").clicked() {
-                            let ext = if cfg!(windows) { ".exe" } else { "" };
-                            let out = exe_dir().join(format!("gangli-{network}{ext}"));
-                            match std::env::current_exe().map_err(anyhow::Error::from).and_then(|me| crate::embed::pack(&me, &out, public)) {
-                                Ok(()) => {
-                                    self.toast(format!("ready: {}", out.display()), false);
-                                    reveal(&out);
-                                }
-                                Err(e) => self.toast(format!("{e:#}"), true),
-                            }
-                        }
-                    });
+                    if ui.button("Copy").clicked() {
+                        self.copy = Some(public.clone());
+                    }
                     ui.add_space(10.0);
                     ui.label(RichText::new("Private code: makes a console an owner of the network").strong().color(AMBER));
                     ui.label(RichText::new("Keep it safe and never put it on a managed machine. It cannot be revoked.").weak());
@@ -1653,6 +1687,70 @@ impl App {
                 }
                 Modal::Confirm { text, .. } => {
                     ui.label(text.as_str());
+                }
+                Modal::TokenEdit { name, new_name, scope, token, instructions } => {
+                    ui.heading(format!("Token {name}"));
+                    ui.add(egui::Label::new(RichText::new(token.as_str()).monospace()).wrap());
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy the token").clicked() {
+                            self.copy = Some(token.clone());
+                            self.toast("Token copied", false);
+                        }
+                        if ui.button("Copy instructions for an AI agent").clicked() {
+                            self.copy = Some(instructions.clone());
+                            self.toast("Instructions copied", false);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(new_name).desired_width(220.0));
+                    });
+                    for sc in ["read", "exec", "admin"] {
+                        ui.radio_value(scope, sc.to_string(), sc);
+                    }
+                }
+                Modal::Tunnel { editing, node, target: tgt, listen, name } => {
+                    ui.heading(if editing.is_some() { "Tunnel" } else { "New tunnel" });
+                    let names: Vec<(String, String)> = self.nodes.iter().map(|n| (target(n), n.name.clone())).collect();
+                    let shown = names.iter().find(|(t, _)| t == node).map(|(_, n)| n.clone()).unwrap_or_else(|| node.clone());
+                    egui::Grid::new("tunnel-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Machine");
+                        egui::ComboBox::from_id_salt("tun_node").selected_text(if shown.is_empty() { "choose".into() } else { shown }).show_ui(ui, |ui| {
+                            for (t, n) in &names {
+                                ui.selectable_value(node, t.clone(), n);
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Their address");
+                        ui.add(egui::TextEdit::singleline(tgt).hint_text("host:port on its network, e.g. 192.168.1.20:80").desired_width(260.0));
+                        ui.end_row();
+                        ui.label("Local port");
+                        ui.add(egui::TextEdit::singleline(listen).hint_text("empty: a free one").desired_width(120.0));
+                        ui.end_row();
+                        ui.label("Name");
+                        ui.add_enabled(editing.is_none(), egui::TextEdit::singleline(name).hint_text("optional").desired_width(180.0));
+                        ui.end_row();
+                    });
+                }
+                Modal::Rule { index, hosts, users, password, keys } => {
+                    ui.heading(match index {
+                        Some(i) => format!("Login rule {i}"),
+                        None => "New login rule".into(),
+                    });
+                    egui::Grid::new("rule-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Machines");
+                        ui.add(egui::TextEdit::singleline(hosts).hint_text("comma separated, * = all").desired_width(300.0));
+                        ui.end_row();
+                        ui.label("Users");
+                        ui.add(egui::TextEdit::singleline(users).hint_text("comma separated, * = all").desired_width(300.0));
+                        ui.end_row();
+                        ui.label("Password");
+                        ui.add(egui::TextEdit::singleline(password).hint_text(if index.is_some() { "empty: keep the current one" } else { "empty: a generated one" }).desired_width(300.0));
+                        ui.end_row();
+                    });
+                    ui.label("Public keys, one per line (e.g. your Pageant key, from PuTTYgen):");
+                    ui.add(egui::TextEdit::multiline(keys).hint_text("ssh-ed25519 AAAA…").desired_rows(3).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 }
                 Modal::NewToken { name, scope } => {
                     ui.heading("New API token");
@@ -1701,6 +1799,30 @@ impl App {
                     ui.add_space(6.0);
                     ui.add(egui::TextEdit::multiline(text).hint_text("https://relay.example.org").desired_rows(4).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                 }
+                Modal::Carried { nets } => {
+                    ui.heading("This gangli carries networks");
+                    ui.label("Join this computer to:");
+                    ui.add_space(4.0);
+                    for (n, on) in nets.iter_mut() {
+                        let label = if n.name.is_empty() { format!("network {}", &n.code[..8]) } else { n.name.clone() };
+                        ui.checkbox(on, RichText::new(label).strong());
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("The node then runs and a console of each network admits this computer. Only join networks you expect.").weak());
+                }
+                Modal::MakeExe { picks } => {
+                    ui.heading("Create a gangli executable");
+                    ui.label("A copy of this gangli that carries the ticked networks (public codes and relays): whoever runs it is asked to join them, and the machine becomes a node.");
+                    ui.add_space(4.0);
+                    for (name, on) in picks.iter_mut() {
+                        ui.checkbox(on, RichText::new(name.as_str()).strong());
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!(
+                        "It is made for {} next to this gangli; for another system: `gangli pack --network NAME --from <its release binary> --out FILE`.",
+                        std::env::consts::OS
+                    )).weak());
+                }
                 Modal::PairConfirm { offers } => {
                     ui.heading("Your phone sent networks");
                     ui.label("Join this computer to:");
@@ -1740,6 +1862,48 @@ impl App {
                     if ui.button("Cancel").clicked() {
                         keep = false;
                     }
+                } else if let Modal::TokenEdit { name, new_name, scope, .. } = &m {
+                    if ui.button(RichText::new("Save").strong()).clicked() {
+                        let op = IpcOp::ApiTokenSet { name: name.clone(), new_name: Some(new_name.trim().to_string()), scope: Some(scope.clone()) };
+                        self.call(Tag::Done("Token saved".into()), op);
+                        keep = false;
+                    }
+                    if ui.button("Close").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Tunnel { editing, node, target: tgt, listen, name } = &m {
+                    let ok = !node.is_empty() && (tgt.contains(':') || tgt.trim().parse::<u16>().is_ok());
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new("Save").strong())).clicked() {
+                        let node_name = self.nodes.iter().find(|n| target(n) == *node).map(|n| n.name.clone()).unwrap_or_else(|| node.clone());
+                        let name = match editing {
+                            Some(n) => n.clone(),
+                            None if !name.trim().is_empty() => name.trim().to_string(),
+                            None => {
+                                let port = if listen.trim().is_empty() { tgt.rsplit(':').next().unwrap_or("").to_string() } else { listen.trim().to_string() };
+                                crate::util::slug(&format!("{node_name}-{port}"))
+                            }
+                        };
+                        let listen = (!listen.trim().is_empty()).then(|| listen.trim().to_string());
+                        self.call(Tag::Done(format!("tunnel {name} saved")), IpcOp::TunnelAdd { name, node: node.clone(), target: tgt.trim().to_string(), listen });
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Rule { index, hosts, users, password, keys } = &m {
+                    if ui.button(RichText::new("Save").strong()).clicked() {
+                        let split = |s: &str| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
+                        let keys: Vec<String> = keys.lines().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
+                        let password = (!password.trim().is_empty()).then(|| password.trim().to_string());
+                        match index {
+                            Some(i) => self.call(Tag::Done("Rule saved".into()), IpcOp::SshLoginSet { index: *i, hosts: split(hosts), users: split(users), password, keys }),
+                            None => self.call(Tag::Done("Rule added".into()), IpcOp::SshLoginAdd { hosts: split(hosts), users: split(users), password, key: None, keys }),
+                        }
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
                 } else if let Modal::NewToken { name, scope } = &m {
                     if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(RichText::new("Create").strong())).clicked() {
                         self.call(Tag::Token, IpcOp::ApiTokenAdd { name: name.trim().to_string(), scope: scope.clone() });
@@ -1771,9 +1935,27 @@ impl App {
                         keep = false;
                     }
                 } else if let Modal::PairConfirm { offers } = &m {
-                    let codes: Vec<String> = offers.iter().filter(|(_, on)| *on).map(|(o, _)| o.code.clone()).collect();
-                    if ui.add_enabled(!codes.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
-                        self.join_codes(codes);
+                    let nets: Vec<(String, Vec<String>)> = offers.iter().filter(|(_, on)| *on).map(|(o, _)| (o.code.clone(), vec![])).collect();
+                    if ui.add_enabled(!nets.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
+                        self.join_codes(nets);
+                        keep = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::Carried { nets } = &m {
+                    let picked: Vec<(String, Vec<String>)> = nets.iter().filter(|(_, on)| *on).map(|(n, _)| (n.code.clone(), n.relays.clone())).collect();
+                    if ui.add_enabled(!picked.is_empty(), egui::Button::new(RichText::new("Join").strong())).clicked() {
+                        self.join_codes(picked);
+                        keep = false;
+                    }
+                    if ui.button("Not now").clicked() {
+                        keep = false;
+                    }
+                } else if let Modal::MakeExe { picks } = &m {
+                    let names: Vec<String> = picks.iter().filter(|(_, on)| *on).map(|(n, _)| n.clone()).collect();
+                    if ui.add_enabled(!names.is_empty(), egui::Button::new(RichText::new("Create").strong())).clicked() {
+                        self.call(Tag::Bundle, IpcOp::NetworkBundle { names });
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {

@@ -42,7 +42,7 @@ to connectivity, and its other jobs are done by the consoles.
 | **console** | where the owner works: GUI with tray icon, CLI, local API | the user, only while it is open — **never a service or a background daemon** | no |
 | **hub** | not a role: a console left open on an always-on machine (home box, VPS), for an always-current view and automations while the owner's PC is off | the user | no |
 
-One unified GUI (section 12): *this computer* can be a node (enter or use the embedded public code, start,
+One unified GUI (section 12): *this computer* can be a node (join with a public code, the phone, or the networks the binary carries, start,
 optionally install the service) and a console (create a network, enter a private code, machines list) at
 the same time. With a subcommand the binary is the CLI.
 
@@ -366,10 +366,14 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   into the same terminal), macOS `osascript … with administrator privileges`, Linux `pkexec` then `sudo`.
 - `gangli join` / `leave` / `status` change the node state file under a cross-process lock (elevated only
   when the service is installed); the node rereads it every 2 s.
-- **Embedded public code** without recompiling: a trailer at the end of the file (`code | u32 length |
-  "GANGLI-CODE1"`), or a `gangli.code` file next to the binary. `gangli pack --code … --from <release> --out
-  <file>` makes personalized copies for each OS. Double click → GUI: "Start" (as this user) or "Install"
-  (one elevation prompt) → done.
+- **Networks carried by the binary [decided 2026-11-22]**, without recompiling: a trailer at the end of the
+  file (`JSON | u32 length | "GANGLI-NETS1"`; the JSON lists one or more networks: public code, name, extra
+  relays), or a `gangli.networks` file with the same JSON next to the binary. Only public codes (refused
+  otherwise, when packing and when reading). Made by *Networks → Create gangli executable…* (tick the
+  networks; a copy of this binary next to it) or `gangli pack --network NAME… [--code CODE…] [--from
+  <release binary of another OS>] --out <file>`. Run by a relative: the window asks "This gangli carries
+  networks: join?" (ticked), then joins them with their relays and runs the node; `gangli node` and
+  `gangli install` without `--code` join them too.
   - Windows: appended data to an unsigned PE is fine.
   - macOS arm64 needs a valid (ad-hoc) signature: `pack` re-signs ad hoc in-process (`apple-codesign`)
     **[verify early]**; fallback: code in a file next to the binary.
@@ -434,13 +438,16 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   - *Networks*: the networks, each with codes, relays (extra ones, sent to its machines; the console's own
     relay shown) and remove; one *New network…* button at the top opens a dialog: create one (then the
     dialog with its QR for the phone wallet, the public code, and the private one hidden until asked) or add
-    one already owned with its private code; "prepare a gangli" writes a copy of this binary with the public code
-    embedded next to it, for a relative;
-  - *Tunnels*: list with on / off and state, add, remove;
-  - *SSH*: gateway address, login rules (passwords hidden unless asked, copy), add / remove, launchers;
-  - *API*: *New token…* at the top (name, scope), then the tokens, each with *Copy token*, *Copy
-    instructions* (for an AI agent) and *Revoke*, at any time (`gangli api token show NAME [--save FILE]`);
-    on / off;
+    one already owned with its private code; *Create gangli executable…* (next to it) writes a copy of this
+    binary carrying the ticked networks, for a relative;
+  - **Every page puts its actions above its list [decided 2026-11-22]**: the main one ("New …") at the top
+    right, opening a dialog; each row has its own (*Edit*, *Remove*…).
+  - *Tunnels*: *New tunnel…*; list with on / off and state, *Edit* (machine, address, local port), *Remove*;
+  - *SSH*: *New rule…*; gateway address, login rules (passwords hidden unless asked, copy), each with
+    *Edit* (machines, users, password, keys one per line: `ssh_login_set`) and *Remove*; launchers;
+  - *API*: *New token…* (name, scope); the tokens, each with *View / edit* (its value and the instructions
+    for an AI agent to copy, its name and scope to change: `ApiTokenSet`), *Copy token*, *Copy
+    instructions*, *Revoke*, at any time (`gangli api token show NAME [--save FILE]`); on / off;
   - *This computer* (node): **a summary of its networks [decided 2026-11-22]**: for each, admitted or not
     (and why not), its name there, the consoles connected now (and since when) or when the last one left,
     and *Leave*; **pair with your phone** (section 10), join with a public code (prefilled when embedded),

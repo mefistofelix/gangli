@@ -73,7 +73,7 @@ src/update.rs         self-update (platform check, swap, restart)
 src/pair.rs           joining from a phone: pairing QR, encrypted answer through the pkarr relays
 src/qr.rs             QR codes (matrix; terminal rendering)
 src/directory.rs      the network directory on pkarr (DHT + relays), node ids encrypted
-src/embed.rs          public code embedded in a binary (`pack`) or in gangli.code next to it
+src/embed.rs          networks a binary carries (`pack`; public codes and relays) or gangli.networks next to it
 src/proto.rs          wire protocol gangli/2: messages, frames, connect/request helpers
 src/cert.rs code.rs   certificates; public / private network codes and derived secrets
 src/state.rs store.rs node state (system or user folder); locked owner-only JSON files

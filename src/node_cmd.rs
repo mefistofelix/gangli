@@ -78,14 +78,18 @@ pub fn pair(minutes: u64, yes: bool, json: bool) -> Result<()> {
 }
 
 /// `gangli node [--code CODE]`: run the node now, in the foreground, as the current user (or root). The code
-/// (or the one embedded in the binary) is joined first if this machine is not in that network yet.
+/// (or the networks the binary carries) is joined first if this machine is not in that network yet.
 pub fn run(code: Option<String>) -> Result<()> {
     if crate::paths::service_installed() && !crate::elevate::is_root() {
         bail!("the gangli service is installed and already runs the node on this machine (see `gangli status`)");
     }
-    if let Some(c) = code.or_else(crate::embed::embedded_code) {
-        let name = state::add_join(&c)?;
-        eprintln!("network membership: {name}");
+    let joined = match code {
+        Some(c) => vec![state::add_join(&c)?],
+        // The networks this binary carries, with their relays.
+        None => state::join_bundled()?,
+    };
+    if !joined.is_empty() {
+        eprintln!("network membership: {}", joined.join(", "));
     }
     if state::load()?.networks.is_empty() {
         bail!("no network to join: `gangli node --code <public code>`");

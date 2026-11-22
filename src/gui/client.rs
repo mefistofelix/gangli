@@ -27,6 +27,10 @@ pub enum Tag {
     Token,
     /// An API token asked for again: copy this field of the answer (`token` or `instructions`).
     CopyField(&'static str),
+    /// An API token asked for again: show it to view and edit.
+    TokenView,
+    /// What a gangli executable carries: write it.
+    Bundle,
     /// A launcher command line to start.
     Launch,
     /// Gateway login of a machine: copy the password.

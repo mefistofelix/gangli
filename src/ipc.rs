@@ -21,6 +21,8 @@ pub enum IpcOp {
     NetworkAdd { code: String, name: Option<String> },
     NetworkCodes { name: String },
     NetworkRemove { name: String },
+    /// What a gangli executable carries for these networks: public codes, names, relays (embed.rs).
+    NetworkBundle { names: Vec<String> },
     /// A network's extra relays (on top of the n0 ones): shown, or replaced with `set` (an empty list clears
     /// them); sent to its machines.
     NetworkRelays { name: String, #[serde(default)] set: Option<Vec<String>> },
@@ -35,14 +37,18 @@ pub enum IpcOp {
     ApiTokenRemove { name: String },
     /// A token again, with the instructions for an AI agent (local CLI / GUI only).
     ApiTokenShow { name: String },
+    /// Rename a token or change its scope (the value stays).
+    ApiTokenSet { name: String, #[serde(default)] new_name: Option<String>, #[serde(default)] scope: Option<String> },
     TunnelList,
     TunnelAdd { name: String, node: String, target: String, listen: Option<String> },
     TunnelRemove { name: String },
     TunnelSet { name: String, enabled: bool },
     SshStatus,
     SshPassword { node: String, user: Option<String> },
-    SshLoginAdd { hosts: Vec<String>, users: Vec<String>, password: Option<String>, key: Option<String> },
+    SshLoginAdd { hosts: Vec<String>, users: Vec<String>, password: Option<String>, key: Option<String>, #[serde(default)] keys: Vec<String> },
     SshLoginRemove { index: usize },
+    /// Replace login rule `index` (1-based); no `password`: keep its password.
+    SshLoginSet { index: usize, hosts: Vec<String>, users: Vec<String>, #[serde(default)] password: Option<String>, keys: Vec<String> },
     Launch { node: String, launcher: Option<String>, user: Option<String>, #[serde(default)] term: Option<String> },
     TermList { node: String },
     TermKill { node: String, name: String },
@@ -64,6 +70,7 @@ impl IpcOp {
         match self {
             IpcOp::Status | IpcOp::Nodes { .. } | IpcOp::Info { .. } => Some("read"),
             IpcOp::NetworkRelays { set: None, .. } => Some("read"),
+            IpcOp::NetworkBundle { .. } => Some("admin"),
             IpcOp::NetworkRelays { .. } => Some("admin"),
             IpcOp::NetworkCreate { .. } | IpcOp::NetworkAdd { .. } | IpcOp::NetworkCodes { .. } | IpcOp::NetworkRemove { .. } | IpcOp::Forget { .. } => Some("admin"),
             IpcOp::TunnelList => Some("read"),
@@ -74,9 +81,9 @@ impl IpcOp {
             IpcOp::SshStatus | IpcOp::SshPassword { .. } | IpcOp::Launch { .. } | IpcOp::Update { .. } => Some("admin"),
             // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
             // the API itself and its tokens.
-            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::Stop => Some("admin"),
+            IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::SshLoginSet { .. } | IpcOp::Stop => Some("admin"),
             IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
-            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } => None,
+            IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } | IpcOp::ApiTokenSet { .. } => None,
         }
     }
 }

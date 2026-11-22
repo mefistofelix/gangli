@@ -165,6 +165,34 @@ pub fn node_key() -> Result<SecretKey> {
     })
 }
 
+/// Join a network with its public code and extra relays (the ones a carried network brings; a console sends
+/// its own later). Returns the local name of the membership.
+pub fn add_join_with(code_str: &str, relays: &[String]) -> Result<String> {
+    let name = add_join(code_str)?;
+    let relays = crate::util::relay_list(relays)?;
+    if !relays.is_empty() {
+        if let Code::Public { network, .. } = code::decode(code_str)? {
+            let id = network.to_string();
+            update(|st| {
+                if let Some(m) = st.networks.iter_mut().find(|m| m.id == id) {
+                    for r in &relays {
+                        if !m.relays.contains(r) {
+                            m.relays.push(r.clone());
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok(name)
+}
+
+/// Join the networks this binary carries (embed.rs) that this machine is not in yet. Returns their names.
+pub fn join_bundled() -> Result<Vec<String>> {
+    crate::embed::not_joined().iter().map(|n| add_join_with(&n.code, &n.relays)).collect()
+}
+
 /// Join a network with its public code; the running node asks a console to admit it. Returns the local
 /// name of the membership (`pending-…` until admitted). Joining a network already joined is a no-op.
 pub fn add_join(code_str: &str) -> Result<String> {

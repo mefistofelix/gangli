@@ -1219,6 +1219,7 @@ fn api_help(c: &Console) -> Value {
             op("ssh_password", "admin", json!({ "node": "name", "user": "optional" }), "gateway login and password for a machine"),
             op("ssh_login_add", "admin", json!({ "hosts": ["*"], "users": ["*"], "password": "optional", "key": "optional OpenSSH public key" }), "allow a key or a password on the gateway (the same hosts and users as an existing rule: added to it)"),
             op("ssh_login_remove", "admin", json!({ "index": "rule number from ssh_status" }), "remove a login rule"),
+            op("ssh_login_set", "admin", json!({ "index": "rule number", "hosts": ["*"], "users": ["*"], "password": "optional (empty: keep)", "keys": ["OpenSSH public keys"] }), "replace a login rule"),
             op("launch", "admin", json!({ "node": "name", "launcher": "optional (PuTTY, OpenSSH, WinSCP...)", "user": "optional", "term": "optional persistent terminal" }), "the filled command line of a launcher (argv), to start it yourself"),
             op("tunnel_add", "admin", json!({ "name": "text", "node": "name", "target": "host:port on its network", "listen": "optional local port or address" }), "save and start a tunnel"),
             op("tunnel_remove", "admin", json!({ "name": "text" }), "remove a tunnel"),
@@ -1227,6 +1228,7 @@ fn api_help(c: &Console) -> Value {
             op("network_add", "admin", json!({ "code": "private code", "name": "optional" }), "add a network owned elsewhere"),
             op("network_codes", "admin", json!({ "name": "network" }), "a network's codes"),
             op("network_remove", "admin", json!({ "name": "network" }), "remove a network from this console"),
+            op("network_bundle", "admin", json!({ "names": ["network"] }), "what a gangli executable carries for these networks (public codes, relays); `gangli pack --network` makes one"),
             op("network_relays", "read / admin with set", json!({ "name": "network", "set": "optional list of https:// relay URLs ([] clears)" }), "a network's extra iroh relays (on top of the n0 ones), sent to its machines"),
             op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
             op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "folder with the release binaries" }), "send machines a new gangli"),
@@ -1361,6 +1363,19 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 "networks": nets,
             }))
         }
+        IpcOp::NetworkBundle { names } => {
+            let st = c.state.lock().unwrap();
+            let mut networks = vec![];
+            for name in &names {
+                let n = st.networks.iter().find(|n| &n.name == name).ok_or_else(|| anyhow!("no network {name} here"))?;
+                networks.push(crate::embed::BundledNet {
+                    code: code::public_code(&store::secret_from_hex(&n.key)?),
+                    name: n.name.clone(),
+                    relays: n.relays.clone(),
+                });
+            }
+            Ok(serde_json::to_value(crate::embed::Bundle { networks })?)
+        }
         IpcOp::NetworkRelays { name, set } => {
             let net = {
                 let st = c.state.lock().unwrap();
@@ -1482,6 +1497,32 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let instructions = agent_instructions(&url, &token, &listen);
             Ok(json!({ "name": name, "scope": scope, "token": token, "url": url, "enabled": enabled, "instructions": instructions }))
         }
+        IpcOp::ApiTokenSet { name, new_name, scope } => {
+            if let Some(sc) = &scope {
+                if sc != "read" && sc != "exec" && sc != "admin" {
+                    bail!("scope must be read, exec or admin");
+                }
+            }
+            let new_name = new_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty() && *n != name);
+            {
+                let mut st = c.state.lock().unwrap();
+                if let Some(n) = &new_name {
+                    if st.api.tokens.iter().any(|t| &t.name == n) {
+                        bail!("there is already a token named {n}");
+                    }
+                }
+                let t = st.api.tokens.iter_mut().find(|t| t.name == name).ok_or_else(|| anyhow!("no token named {name}"))?;
+                if let Some(sc) = scope {
+                    t.scope = sc;
+                }
+                if let Some(n) = new_name {
+                    t.name = n;
+                }
+            }
+            c.save();
+            let st = c.state.lock().unwrap();
+            Ok(api_json(&st.api, st.console.port))
+        }
         IpcOp::ApiTokenShow { name } => {
             let st = c.state.lock().unwrap();
             let t = st.api.tokens.iter().find(|t| t.name == name).ok_or_else(|| anyhow!("no token named {name}"))?;
@@ -1555,7 +1596,7 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 "listen": st.ssh.listen,
                 "open": c.open,
                 "logins": st.ssh.logins.iter().enumerate().map(|(i, r)| json!({
-                    "index": i + 1, "hosts": r.hosts, "users": r.users, "password": r.password, "keys": r.keys.len(),
+                    "index": i + 1, "hosts": r.hosts, "users": r.users, "password": r.password, "keys": r.keys.len(), "key_list": r.keys,
                 })).collect::<Vec<_>>(),
                 "launchers": st.launchers.iter().map(|l| json!({ "name": l.name, "command": l.command })).collect::<Vec<_>>(),
             }))
@@ -1564,16 +1605,17 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let (login, password, port, _) = login_for(c, &node, user.as_deref())?;
             Ok(json!({ "login": login, "password": password, "host": "127.0.0.1", "port": port }))
         }
-        IpcOp::SshLoginAdd { hosts, users, password, key } => {
+        IpcOp::SshLoginAdd { hosts, users, password, key, keys } => {
             let password_given = password.is_some();
-            if let Some(k) = &key {
-                russh::keys::PublicKey::from_openssh(k.trim()).map_err(|e| anyhow!("not an OpenSSH public key: {e}"))?;
+            let keys: Vec<String> = key.into_iter().chain(keys).map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
+            for k in &keys {
+                russh::keys::PublicKey::from_openssh(k).map_err(|e| anyhow!("not an OpenSSH public key: {e}"))?;
             }
             let rule = crate::ssh::LoginRule {
                 hosts: if hosts.is_empty() { vec!["*".into()] } else { hosts },
                 users: if users.is_empty() { vec!["*".into()] } else { users },
                 password: password.unwrap_or_else(crate::ssh::new_password),
-                keys: key.into_iter().map(|k| k.trim().to_string()).collect(),
+                keys,
             };
             let same = |a: &[String], b: &[String]| {
                 let (mut a, mut b) = (a.to_vec(), b.to_vec());
@@ -1602,6 +1644,31 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             };
             c.save();
             Ok(json!({ "index": index, "hosts": shown.hosts, "users": shown.users, "password": shown.password }))
+        }
+        IpcOp::SshLoginSet { index, hosts, users, password, keys } => {
+            let keys: Vec<String> = keys.iter().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
+            for k in &keys {
+                russh::keys::PublicKey::from_openssh(k).map_err(|e| anyhow!("not an OpenSSH public key: {e}"))?;
+            }
+            let clean = |v: Vec<String>| {
+                let v: Vec<String> = v.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                if v.is_empty() { vec!["*".to_string()] } else { v }
+            };
+            {
+                let mut st = c.state.lock().unwrap();
+                if index == 0 || index > st.ssh.logins.len() {
+                    bail!("no login rule {index} (see `gangli ssh status`)");
+                }
+                let r = &mut st.ssh.logins[index - 1];
+                r.hosts = clean(hosts);
+                r.users = clean(users);
+                if let Some(p) = password.filter(|p| !p.trim().is_empty()) {
+                    r.password = p.trim().to_string();
+                }
+                r.keys = keys;
+            }
+            c.save();
+            Ok(json!({ "set": index }))
         }
         IpcOp::SshLoginRemove { index } => {
             {
