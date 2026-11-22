@@ -57,6 +57,7 @@ when a decision changes.
 
 ```
 Cargo.toml            single crate for now (bin `gangli`); split into a workspace when it grows
+build.rs              Windows: the gangli icon embedded in the executable (a .res written by hand)
 src/main.rs           CLI (clap) and dispatch
 src/node.rs           node body (by hand or service): serves console sessions, knocks, pushes inventory
 src/node_cmd.rs       node-side commands (join, leave, status) on the service state
