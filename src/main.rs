@@ -454,7 +454,10 @@ fn main() {
         cli.command,
         Some(Command::Gui { .. }) | Some(Command::Node { .. }) | Some(Command::Run { .. }) | Some(Command::Console(ConsoleCmd::Run))
     ) || (cli.command.is_none() && gui::started_from_desktop());
-    if long_running {
+    // The Windows service does it once it has told the service manager it runs (service/windows.rs): an
+    // exit before that is a failed start, which Windows does not retry; after it, a restart it performs.
+    let windows_service = cfg!(windows) && matches!(cli.command, Some(Command::Run { service: true }));
+    if long_running && !windows_service {
         update::on_start();
     }
     let result: anyhow::Result<()> = match cli.command {
@@ -591,7 +594,6 @@ pub(crate) fn log_line(msg: &str) {
     log_to_file(&format!("node: {msg}"));
 }
 
-/// Append a timestamped line to `gangli.log` next to the binary, restarting it past 1 MB.
 fn parse_keep_awake(s: &str) -> Result<power::KeepAwake, String> {
     match s {
         "off" => Ok(power::KeepAwake::Off),
@@ -601,6 +603,7 @@ fn parse_keep_awake(s: &str) -> Result<power::KeepAwake, String> {
     }
 }
 
+/// Append a timestamped line to `gangli.log` next to the binary, restarting it past 1 MB.
 pub(crate) fn log_to_file(msg: &str) {
     use std::io::Write;
     let path = paths::log_file();

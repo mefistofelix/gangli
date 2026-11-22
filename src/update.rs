@@ -11,8 +11,9 @@
 //!    new binary with the same arguments, which waits for the old process to be gone).
 //! 3. **Probation**: the update is kept as soon as a long-running gangli on the new binary has run 30 s or
 //!    ended normally: `.rollback` becomes `<binary>.previous` (the last version, for a rollback by hand). If
-//!    three minutes after the swap none has (it keeps failing: a service is restarted every 5 s), the next
-//!    start puts the previous binary back (the new one becomes `<binary>.failed`) and restarts on it.
+//!    three minutes after the swap none has and it has been started at least four times (it keeps failing:
+//!    a service is restarted every 5 s; a sleep alone makes time pass, not starts), the next start puts the
+//!    previous binary back (the new one becomes `<binary>.failed`) and restarts on it.
 //! 4. **Watch**: every long-running gangli looks every 30 s, locally, for a `.update` to apply or for its
 //!    binary replaced by another gangli of the same folder (the window updating while the service runs from
 //!    the same file), and restarts on the new one.
@@ -241,13 +242,39 @@ pub fn apply_staged() -> Result<bool> {
     if let Ok(f) = std::fs::OpenOptions::new().write(true).open(exe()) {
         let _ = f.set_modified(SystemTime::now());
     }
+    if aside == back {
+        set_probation_starts(&back, 0);
+    }
     crate::log_line(&format!("updated to {version}: restarting on it (the previous binary is kept until it has run 30 s)"));
     Ok(true)
+}
+
+/// Starts of the new binary during its probation, kept as the date of `.rollback` (seconds after 1970: the
+/// file is the previous binary, its date means nothing else; no other file next to gangli).
+fn probation_starts(back: &Path) -> Option<u64> {
+    let s = std::fs::metadata(back).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    (s < 1000).then_some(s)
+}
+
+fn set_probation_starts(back: &Path, n: u64) -> bool {
+    let mut o = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        // Only the attributes: the previous binary may still be running (the window not restarted yet).
+        use std::os::windows::fs::OpenOptionsExt;
+        o.access_mode(0x100); // FILE_WRITE_ATTRIBUTES
+    }
+    #[cfg(not(windows))]
+    o.write(true);
+    o.open(back).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(n))).is_ok()
 }
 
 /// Keep the update this process runs on, if it is on probation (it ran long enough, or ended normally).
 pub fn confirm() {
     if std::fs::rename(sibling(".rollback"), sibling(".previous")).is_ok() {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(sibling(".previous")) {
+            let _ = f.set_modified(SystemTime::now());
+        }
         crate::log_line("update kept (the previous binary is the .previous file)");
     }
 }
@@ -256,6 +283,9 @@ pub fn confirm() {
 /// Windows recovery action); anything else starts the new binary with the same arguments, telling it to wait
 /// until this process is gone (the window's single instance, the node's status port). Does not return.
 pub fn restart() -> ! {
+    // A keep-awake request ends with this process: let the machine's idle time start again from zero, or it
+    // may go to sleep this very second (it had been idle all along) before the new process takes over.
+    crate::power::nudge();
     if in_service() {
         std::process::exit(if cfg!(windows) { 1 } else { 0 });
     }
@@ -316,8 +346,13 @@ pub fn on_start() {
     let back = sibling(".rollback");
     if back.exists() {
         let since_swap = fingerprint().and_then(|(_, t)| t.elapsed().ok()).unwrap_or_default();
-        if since_swap > Duration::from_secs(180) {
-            // Three minutes and no gangli kept running on the new binary: back to the previous one.
+        // Starts on the new binary are counted (in `.rollback`'s date): a start long after the swap may only
+        // follow a sleep (seen: the machine slept the second the service restarted, and woke 6 minutes
+        // later), so only a binary that keeps failing goes back.
+        let starts = probation_starts(&back).unwrap_or(0) + 1;
+        let counted = set_probation_starts(&back, starts);
+        if since_swap > Duration::from_secs(180) && (starts >= 4 || !counted) {
+            // Three minutes, several starts and no gangli kept running on the new binary: back to the previous one.
             let _ = std::fs::rename(exe(), sibling(".failed"));
             if std::fs::rename(&back, exe()).is_ok() {
                 crate::log_line("the updated binary did not keep running: back to the previous one (kept as .failed)");

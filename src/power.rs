@@ -101,6 +101,13 @@ pub async fn hold(want: bool) {
     }
 }
 
+/// Start the machine's idle time again from zero (Windows): when the keep-awake request ends (turned off, or
+/// the process restarting for an update), a machine idle for longer than its sleep timeout would otherwise go
+/// to sleep that same second. Harmless when nothing is held.
+pub fn nudge() {
+    imp::nudge();
+}
+
 /// "never", "10 min", "2 h".
 pub fn minutes_label(m: Option<u32>) -> String {
     match m {
@@ -187,6 +194,11 @@ mod imp {
         }
     }
 
+    /// Without ES_CONTINUOUS: resets the idle timer once.
+    pub fn nudge() {
+        unsafe { SetThreadExecutionState(ES_SYSTEM_REQUIRED) };
+    }
+
     static WANT: AtomicBool = AtomicBool::new(false);
     static THREAD: OnceLock<()> = OnceLock::new();
 
@@ -201,6 +213,9 @@ mod imp {
                     if want != was {
                         let flags = if want { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS };
                         unsafe { SetThreadExecutionState(flags) };
+                        if !want {
+                            nudge();
+                        }
                         was = want;
                     }
                     std::thread::sleep(Duration::from_millis(500));
@@ -281,6 +296,9 @@ mod imp {
         Power { sleep_ac: get(&ac, "sleep"), sleep_dc: get(&dc, "sleep"), display_ac: get(&ac, "displaysleep"), display_dc: get(&dc, "displaysleep"), ..Default::default() }
     }
 
+    /// macOS restarts its idle count when an assertion is released.
+    pub fn nudge() {}
+
     static ID: Mutex<Option<u32>> = Mutex::new(None);
 
     pub async fn hold(want: bool) -> Result<()> {
@@ -336,6 +354,9 @@ mod imp {
     pub fn timeouts() -> Power {
         Power::default()
     }
+
+    /// logind's idle action counts from the last input, not from the inhibitor: nothing to do.
+    pub fn nudge() {}
 
     /// The logind inhibitor lives as long as this descriptor.
     static FD: Mutex<Option<zbus::zvariant::OwnedFd>> = Mutex::new(None);

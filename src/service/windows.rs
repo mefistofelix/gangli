@@ -118,6 +118,9 @@ fn run_service() -> io::Result<()> {
 
     set(ServiceState::Running, ServiceControlAccept::STOP | ServiceControlAccept::PRESHUTDOWN)
         .map_err(to_io)?;
+    // Now that the service manager knows it runs: a staged update, the probation (update.rs). Restarting from
+    // here is an exit Windows recovers from (the service's restart action), not a failed start.
+    crate::update::on_start();
 
     // Run the agent body on a worker thread; wake when the SCM asks us to stop.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

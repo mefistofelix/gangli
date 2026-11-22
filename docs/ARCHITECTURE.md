@@ -485,8 +485,14 @@ Names: the admitting console names nodes (slug of the hostname and, when someone
      (`GANGLI_WAIT_PID`: the window's single instance, the node's status port).
   3. *Probation*: the update is kept once a long-running gangli on it has run 30 s or ended normally
      (`.rollback` → `<binary>.previous`, the last version, for a rollback by hand). If three minutes after
-     the swap none has (the new binary keeps failing; a service is restarted every 5 s), the next start puts
-     `.rollback` back and the new binary becomes `.failed`.
+     the swap none has **and the new binary has been started at least four times** (it keeps failing; a
+     service is restarted every 5 s), the next start puts `.rollback` back and the new binary becomes
+     `.failed`. The starts are counted in `.rollback`'s date (no other file): time alone misled it once,
+     when the machine went to sleep the second the service restarted and woke six minutes later
+     **[decided 2026-11-22]**. The Windows service does this bookkeeping only after it has reported
+     *running* to the service manager: an exit before that is a failed start, which Windows does not
+     retry. And every restart first resets the machine's idle timer (`power::nudge`), so the end of a
+     keep-awake request with the old process does not put an idle machine to sleep that same second.
   4. *Watch*: each long-running gangli looks every 30 s, on the local disk only (no network: not polling),
      for a `.update` to apply, or for its binary replaced by another gangli of the same folder (the window
      updated while the service runs from the same file), and restarts on the new one.
