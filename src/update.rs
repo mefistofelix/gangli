@@ -223,7 +223,10 @@ pub fn wait_for_predecessor() {
     unsafe { std::env::remove_var("GANGLI_WAIT_PID") };
     let pid = sysinfo::Pid::from_u32(pid);
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        std::thread::sleep(Duration::from_secs(3));
+        return;
+    };
     while Instant::now() < deadline {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         if sys.process(pid).is_none() {
