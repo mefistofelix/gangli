@@ -176,6 +176,40 @@ pub async fn apply_relays(ep: &iroh::Endpoint, want: &[String], applied: &mut Ve
     }
 }
 
+/// How this endpoint reaches the Internet now (iroh's net report through the relays).
+#[allow(unused_mut)]
+pub fn net_info(ep: &iroh::Endpoint) -> crate::inventory::NetInfo {
+    use iroh::Watcher;
+    let port = ep.bound_sockets().iter().find(|a| a.is_ipv4()).map(|a| a.port()).unwrap_or(0);
+    let mut w = ep.net_report();
+    match w.get() {
+        Some(r) => crate::inventory::NetInfo {
+            udp_v4: r.udp_v4,
+            udp_v6: r.udp_v6,
+            public_v4: r.global_v4.map(|a| a.to_string()).unwrap_or_default(),
+            public_v6: r.global_v6.map(|a| a.to_string()).unwrap_or_default(),
+            nat_varies: r.mapping_varies_by_dest_ipv4,
+            port,
+        },
+        None => crate::inventory::NetInfo { port, ..Default::default() },
+    }
+}
+
+/// Bind an endpoint, on the IPv4 UDP port `port` when one is set (a port the router forwards); when that
+/// port cannot be had, on a random one as usual.
+pub async fn bind_endpoint(builder: impl Fn() -> iroh::endpoint::Builder, port: Option<u16>) -> anyhow::Result<iroh::Endpoint> {
+    if let Some(p) = port.filter(|p| *p > 0) {
+        match builder().bind_addr(std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, p)) {
+            Ok(b) => match b.bind().await {
+                Ok(ep) => return Ok(ep),
+                Err(e) => crate::log_to_file(&format!("UDP port {p} not available ({e}): a random one")),
+            },
+            Err(e) => crate::log_to_file(&format!("UDP port {p}: {e}")),
+        }
+    }
+    builder().bind().await.map_err(|e| anyhow::anyhow!("start endpoint: {e}"))
+}
+
 /// The relay this endpoint is reachable at now (its home relay), empty if none yet.
 #[allow(unused_mut)]
 pub fn home_relay(ep: &iroh::Endpoint) -> String {

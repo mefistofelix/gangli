@@ -153,10 +153,13 @@ impl ProtocolHandler for NodeHandler {
 
 /// The node's home relay, kept current by the main loop (the inventory reports it).
 static HOME_RELAY: Mutex<String> = Mutex::new(String::new());
+/// How the node reaches the Internet, kept current by the main loop (the inventory reports it).
+static NET: Mutex<Option<inventory::NetInfo>> = Mutex::new(None);
 
 async fn collect() -> Inventory {
     let mut inv = tokio::task::spawn_blocking(inventory::collect).await.unwrap_or_default();
     inv.relay = HOME_RELAY.lock().unwrap().clone();
+    inv.net = NET.lock().unwrap().clone().unwrap_or_default();
     inv
 }
 
@@ -184,11 +187,16 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
         ),
         None => None,
     };
-    let mut builder = iroh::Endpoint::builder(presets::N0).secret_key(sk);
-    if let Some(m) = crate::util::relay_mode(&conf.relays, conf.relays_n0_fallback)? {
-        builder = builder.relay_mode(m);
-    }
-    let ep = builder.bind().await.ctx("start endpoint")?;
+    let relay_mode = crate::util::relay_mode(&conf.relays, conf.relays_n0_fallback)?;
+    let builder = || {
+        let mut b = iroh::Endpoint::builder(presets::N0).secret_key(sk.clone());
+        if let Some(m) = relay_mode.clone() {
+            b = b.relay_mode(m);
+        }
+        b
+    };
+    // On a fixed UDP port when set (one the router forwards here).
+    let ep = crate::util::bind_endpoint(builder, conf.udp_port).await?;
     let sessions = Arc::new(Sessions::default());
     let router = Router::builder(ep).accept(proto::ALPN, NodeHandler { sessions: sessions.clone() }).spawn();
     log_line(&format!("{} node running, id {me}", crate::version_line()));
@@ -223,6 +231,7 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
             relays_wanted = want;
         }
         *HOME_RELAY.lock().unwrap() = crate::util::home_relay(router.endpoint());
+        *NET.lock().unwrap() = Some(crate::util::net_info(router.endpoint()));
 
         // Networks left (`gangli leave`, the GUI): their consoles are told and their sessions closed.
         let ids: Vec<String> = st.networks.iter().map(|m| m.id.clone()).collect();
@@ -326,9 +335,32 @@ fn status_json(sessions: &Sessions, me: &PublicKey) -> serde_json::Value {
         "node_id": me.to_string(),
         "service": crate::paths::service_installed(),
         "relay": HOME_RELAY.lock().unwrap().clone(),
+        "net": NET.lock().unwrap().clone().unwrap_or_default(),
         "folder": crate::paths::base_dir().display().to_string(),
         "networks": nets,
     })
+}
+
+/// For a console looking for the ports its router forwards to it: one datagram with its token to each port of
+/// the ports it asks of its public IPv4, at most [`proto::PROBE_MAX`] a request and about
+/// [`proto::PROBE_RATE`] a second. Asked only by an authenticated console (which can already run anything here).
+async fn probe_udp(ip: &str, ports: &[u16], token: &str) -> Result<u32> {
+    let addr: std::net::Ipv4Addr = ip.parse().map_err(|_| anyhow!("not an IPv4 address"))?;
+    if ports.len() > proto::PROBE_MAX || ports.contains(&0) || token.len() > 64 {
+        bail!("bad probe");
+    }
+    let sock = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.ctx("udp socket")?;
+    let mut sent = 0u32;
+    // 20 datagrams every 25 ms.
+    for chunk in ports.chunks(proto::PROBE_RATE / 40) {
+        for p in chunk {
+            if sock.send_to(token.as_bytes(), (addr, *p)).await.is_ok() {
+                sent += 1;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(sent)
 }
 
 /// Consoles listed in the network's public directory.
@@ -629,6 +661,16 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                         let _ = send.finish();
                     }
                 }
+            }
+            Req::ProbeUdp { ip, ports, token } if authed => {
+                tokio::spawn(async move {
+                    let resp = match probe_udp(&ip, &ports, &token).await {
+                        Ok(sent) => Resp::Probed { sent },
+                        Err(e) => Resp::Error { message: format!("{e:#}") },
+                    };
+                    let _ = proto::write_frame(&mut send, &resp).await;
+                    let _ = send.finish();
+                });
             }
             Req::Update { size } if authed => {
                 tokio::spawn(receive_update(send, recv, size));

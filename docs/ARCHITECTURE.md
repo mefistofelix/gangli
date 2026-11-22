@@ -122,6 +122,28 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
     (default; `false` drops the n0 ones on that machine only), applied when the node / console starts.
   - Our relay is open to anyone, like n0's **[decided 2026-11-22]**. Closing it would need an access token on
     every machine that talks through it (dialers included), sent by the consoles the same way.
+- **Direct links, also without UPnP [decided 2026-11-22]**. Hole punching fails when one side is behind a
+  NAT that gives a port per destination (mobile networks, CGNAT: the aunt's 4G) and the other side's router
+  does not open a port. A direct path then needs one side reachable from outside, which gangli tries in this
+  order: IPv6 on both sides (iroh uses it by itself); a UDP port the console's router forwards by hand
+  (a port range forwarded to the PC, a DMZ); the router's UPnP / NAT-PMP / PCP (iroh's portmapper).
+  - The open console finds a forwarded port by itself (`probe_ports` in console.rs), 90 s after starting,
+    once per public IPv4 address and while none has been found (forwards stay when the address changes),
+    or when asked (*This computer → Network → Look for a forwarded port*, `gangli net --probe`, API
+    `net_probe`). A machine outside (one whose inventory shows another public address, else one reached
+    through a relay) sends a datagram with a random token to ports of the console's public IPv4
+    (`Req::ProbeUdp`); the console listens on those ports and the first where a token arrives is the one.
+    Plan (`proto::probe_plan`): at most 4096 ports a request, about 800 datagrams a second; first the usual
+    ports (80, 443, 53, 500, 4500, 3478, 51820, …) with one port every 8 below 4096 and one every 256
+    above, then every port below 4096 (hand-made ranges like `0-3000`), then one every 32 and one every 8
+    above: any forwarded range of 8 ports or more is found, ≈ 12,000 datagrams at most, never a full sweep.
+    Ports the console cannot listen on (in use; below 1024 without the right on Linux) are skipped.
+  - The port found goes in `gangli.console` (`udp_port`, `udp_port_found`, `udp_probed`) and the endpoint
+    binds it from the next start (`util::bind_endpoint`, a random port if it is taken); the GUI offers the
+    restart. `udp_port` set by hand is never probed over; nodes have `udp_port` in `[node]` too.
+  - Diagnostics: the node reports how it reaches the Internet in its inventory (`net`: UDP v4/v6, public
+    addresses, NAT kind from iroh's net report; machine details *Its network*), and every path of a link
+    (*Paths*); the console's own in `status` → `net` (*This computer → Network*, `gangli net`).
 - Dialing by id alone works through n0 address lookup: verified on 2026-11-20 (join 3 s, list and direct
   query ≈ 1.4 s including endpoint start, direct path 7 ms on a LAN).
 - ALPN `gangli/2`: length-prefixed JSON frames; resumable streams and terminals get their own ALPNs.

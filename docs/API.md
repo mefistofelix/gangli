@@ -49,10 +49,17 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
   back by itself if the new one does not keep running (section 11 of ARCHITECTURE.md). The console's API
   stops for a few seconds while it restarts.
 
+  Network (admin): `{"op": "net_probe"}` looks for a UDP port the router forwards to this computer (a machine
+  outside sends the probes; up to a minute) and answers `found` (the port, or null) and `net`; a port found
+  is used from the next start, `{"op": "restart"}` restarts gangli now. `status` → `net` shows how this
+  computer reaches the Internet (`public_v4`, `public_v6`, `nat_varies`, `summary`) and its UDP port
+  (`port` now, `fixed` from the configuration, `found`, `restart`: a restart would move to `fixed`).
+
 - `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/<name>`: shortcuts for `status`, `nodes`, `info`.
 
 **The state of each machine** is in `nodes` / `info`: `online`, `since` (this session) or `last_seen`, and
-while online `path`: `relay` (true: through a relay, slower; false: direct), `rtt_ms`, `remote`, and the
+while online `path`: `relay` (true: through a relay, slower; false: direct), `rtt_ms`, `remote`, `paths`
+(every path iroh has, the one in use first), and the
 traffic of the whole connection, `rx_bps` / `tx_bps` (bytes per second, received / sent). A machine that goes
 away comes back by itself (its node knocks); check `online` before acting, and retry an `exec` that failed
 because it went offline. A background job (`job_start`) keeps running on the machine while the console is

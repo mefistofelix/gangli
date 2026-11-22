@@ -25,6 +25,31 @@ use crate::util::Ctx;
 pub const ALPN: &[u8] = b"gangli/2";
 pub const MAX_FRAME: usize = 4 << 20;
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// The port probe (`Req::ProbeUdp`): ports a request, datagrams a second.
+pub const PROBE_MAX: usize = 4096;
+pub const PROBE_RATE: usize = 800;
+
+/// Where a console looks for a UDP port its router forwards to it, in requests of at most [`PROBE_MAX`]
+/// ports, until one answers: the usual ports first with a sample of every range (a forwarded range shows
+/// up as soon as one of its ports is hit), then all the low ports (hand-made forwards like `0-3000`), then
+/// denser and denser samples of the rest. About 12,000 datagrams in all, never a full sweep.
+pub fn probe_plan() -> Vec<Vec<u16>> {
+    const COMMON: [u16; 24] = [
+        53, 80, 88, 123, 443, 500, 1194, 1701, 1723, 3074, 3389, 3478, 4500, 5060, 5353, 7777, 8080, 8443, 9000, 9987, 10000,
+        25565, 27015, 51820,
+    ];
+    let mut seen = vec![false; 65536];
+    let mut take = |ports: &mut dyn Iterator<Item = u16>| -> Vec<u16> {
+        ports.filter(|p| *p > 0 && !std::mem::replace(&mut seen[*p as usize], true)).collect()
+    };
+    let rounds = [
+        take(&mut COMMON.iter().copied().chain((8..=4096).step_by(8)).chain((4096..=65535).step_by(256))),
+        take(&mut (1..=4096)),
+        take(&mut (4096..=65535).step_by(32)),
+        take(&mut (4096..=65535).step_by(8)),
+    ];
+    rounds.into_iter().flat_map(|r| r.chunks(PROBE_MAX).map(|c| c.to_vec()).collect::<Vec<_>>()).filter(|r| !r.is_empty()).collect()
+}
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// How a connection currently reaches the peer.
@@ -38,6 +63,9 @@ pub struct PathInfo {
     pub rx_bps: u64,
     #[serde(default)]
     pub tx_bps: u64,
+    /// Every path iroh has with the machine (the chosen one first): direct addresses it tried and the relay.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// A node as the consoles know it.
@@ -155,6 +183,9 @@ pub enum Req {
     JobKill { id: String },
     /// Console → node: a new binary follows (`size` raw bytes after this frame), signed with the release key.
     Update { size: u64 },
+    /// Console → node: send one UDP datagram holding `token` to each of `ports` of `ip` (the console's public
+    /// IPv4), paced, to find a port its router forwards to it. At most [`PROBE_MAX`] ports a request.
+    ProbeUdp { ip: String, ports: Vec<u16>, token: String },
     /// Console → node, inside a `Stream`: attach to the persistent terminal `name` (started if missing).
     Attach { name: String, user: String, cols: u16, rows: u16 },
     TermList,
@@ -181,6 +212,8 @@ pub enum Resp {
     Started,
     Resumed { received: u64 },
     Updating,
+    /// The probe datagrams went out.
+    Probed { sent: u32 },
     Terms { terms: Vec<TermInfo> },
     Job { id: String },
     Jobs { jobs: Vec<JobInfo> },
@@ -235,7 +268,22 @@ pub fn path_info(conn: &Connection) -> Option<PathInfo> {
     let paths = conn.paths();
     let p = paths.iter().find(|p| p.is_selected())?;
     let remote = format!("{:?}", p.remote_addr());
-    Some(PathInfo { relay: p.is_relay(), rtt_ms: p.rtt().as_millis() as u64, remote: tidy_addr(&remote), ..Default::default() })
+    let mut all: Vec<(bool, String)> = paths
+        .iter()
+        .map(|q| {
+            let kind = if q.is_relay() { "relay" } else { "direct" };
+            let mark = if q.is_selected() { ", in use" } else { "" };
+            (q.is_selected(), format!("{kind} {} ({} ms{mark})", tidy_addr(&format!("{:?}", q.remote_addr())), q.rtt().as_millis()))
+        })
+        .collect();
+    all.sort_by_key(|(sel, _)| !*sel);
+    Some(PathInfo {
+        relay: p.is_relay(),
+        rtt_ms: p.rtt().as_millis() as u64,
+        remote: tidy_addr(&remote),
+        paths: all.into_iter().map(|(_, s)| s).collect(),
+        ..Default::default()
+    })
 }
 
 /// `Ip(1.2.3.4:5)` → `1.2.3.4:5`; relay addresses stay as they are.
@@ -312,5 +360,27 @@ pub mod sframe {
         b[..2].copy_from_slice(&cols.to_be_bytes());
         b[2..].copy_from_slice(&rows.to_be_bytes());
         b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_plan_shape() {
+        let plan = probe_plan();
+        assert!(plan.iter().all(|r| !r.is_empty() && r.len() <= PROBE_MAX));
+        let all: Vec<u16> = plan.iter().flatten().copied().collect();
+        let mut uniq = all.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), all.len(), "no port twice");
+        assert!(!all.contains(&0));
+        // The usual ports come first, every low port is there, the rest is sampled every 8.
+        assert!(plan[0].contains(&443) && plan[0].contains(&80) && plan[0].contains(&51820));
+        assert!((1..=4096).all(|p| uniq.binary_search(&p).is_ok()));
+        assert!(uniq.binary_search(&40000).is_ok() && uniq.binary_search(&40001).is_err());
+        assert!(all.len() < 13_000);
     }
 }

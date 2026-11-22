@@ -183,6 +183,12 @@ enum Command {
         #[arg(long)]
         from: String,
     },
+    /// This console's network: public addresses, NAT, the UDP port (and whether the router forwards one).
+    Net {
+        /// Look again for a UDP port the router forwards here (a machine outside sends the probes).
+        #[arg(long)]
+        probe: bool,
+    },
     /// Tests: cut the open console's connection to a machine (resumable streams must survive it).
     #[command(hide = true, name = "debug-drop")]
     DebugDrop { node: String },
@@ -538,6 +544,7 @@ fn main() {
         Some(Command::Update { nodes, from }) => console_cmd::update(nodes, from, json),
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
         Some(Command::SelfUpdate { from }) => console_cmd::self_update(from, json),
+        Some(Command::Net { probe }) => console_cmd::net(probe, json),
     };
     if long_running && result.is_ok() {
         update::confirm();

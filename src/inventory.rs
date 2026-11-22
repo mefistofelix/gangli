@@ -33,6 +33,45 @@ pub struct Inventory {
     /// The iroh relay the node is reachable at (its home relay), empty if none yet.
     #[serde(default)]
     pub relay: String,
+    /// How it reaches the Internet (what decides whether links with it can be direct).
+    #[serde(default)]
+    pub net: NetInfo,
+}
+
+/// How a gangli reaches the Internet, as iroh measured it through the relays.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct NetInfo {
+    /// UDP works over IPv4 / IPv6.
+    pub udp_v4: bool,
+    pub udp_v6: bool,
+    /// The public IPv4 / IPv6 address and port, as the relays see them.
+    pub public_v4: String,
+    pub public_v6: String,
+    /// The NAT gives another public port for each destination ("symmetric"): direct links then need the
+    /// other side to be reachable (a public address, a forwarded port).
+    pub nat_varies: Option<bool>,
+    /// The local UDP port (IPv4) of its endpoint.
+    pub port: u16,
+}
+
+impl NetInfo {
+    /// One line for people.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![];
+        if !self.udp_v4 && !self.udp_v6 {
+            parts.push("no UDP to the Internet (relay only)".to_string());
+        }
+        if !self.public_v4.is_empty() {
+            let nat = match self.nat_varies {
+                Some(true) => ", NAT: a port per destination (symmetric)",
+                Some(false) => ", NAT: one port for all",
+                None => "",
+            };
+            parts.push(format!("IPv4 {}{nat}", self.public_v4));
+        }
+        parts.push(if self.public_v6.is_empty() { "no IPv6".to_string() } else { format!("IPv6 {}", self.public_v6) });
+        parts.join(" · ")
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -50,7 +89,10 @@ impl Inventory {
         serde_json::json!([
             self.hostname, self.os, self.os_version, self.kernel, self.arch, self.cpus, self.cpu,
             self.mem_total, disks, self.ips, self.users, self.service_user, self.full_access, self.version,
-            self.relay
+            self.relay,
+            // what can change a link (not the public ports, which NATs move around)
+            self.net.udp_v4, self.net.udp_v6, self.net.nat_varies, self.net.public_v6.is_empty(),
+            self.net.public_v4.rsplit_once(':').map(|(ip, _)| ip)
         ])
         .to_string()
     }

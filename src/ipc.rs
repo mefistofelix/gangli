@@ -60,6 +60,10 @@ pub enum IpcOp {
     Update { nodes: Vec<String>, from: String },
     /// Update this computer's gangli (the console's binary): `from` a binary or a release folder.
     SelfUpdate { from: String },
+    /// Look again for a UDP port the router forwards to this computer (a machine outside sends the probes).
+    NetProbe,
+    /// Restart this gangli (window and console) on the same binary, e.g. to bind the UDP port just found.
+    Restart,
     DebugDrop { node: String },
     /// The GUI window's size and place (points), kept in `gangli.console` for the next start.
     GuiWindow { x: f32, y: f32, w: f32, h: f32 },
@@ -84,6 +88,7 @@ impl IpcOp {
             // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::SshLoginSet { .. } | IpcOp::Stop => Some("admin"),
+            IpcOp::NetProbe | IpcOp::Restart => Some("admin"),
             IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } | IpcOp::ApiTokenSet { .. } => None,
         }

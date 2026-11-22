@@ -16,7 +16,7 @@
 //! cannot bind it, so there is no lock file.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -92,6 +92,15 @@ pub struct ConsoleConf {
     /// With own relays, keep the n0 ones as a fallback.
     #[serde(default = "yes")]
     pub relays_n0_fallback: bool,
+    /// A UDP port the router forwards to this computer, for the endpoint: set by hand, or found by probing
+    /// (`udp_port_found`); none: a random port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub udp_port_found: bool,
+    /// The public IPv4 address the last probe was for (probing again only when it changes).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub udp_probed: String,
 }
 
 fn default_port() -> u16 {
@@ -100,7 +109,16 @@ fn default_port() -> u16 {
 
 impl Default for ConsoleConf {
     fn default() -> Self {
-        ConsoleConf { key: String::new(), port: default_port(), token: String::new(), relays: vec![], relays_n0_fallback: true }
+        ConsoleConf {
+            key: String::new(),
+            port: default_port(),
+            token: String::new(),
+            relays: vec![],
+            relays_n0_fallback: true,
+            udp_port: None,
+            udp_port_found: false,
+            udp_probed: String::new(),
+        }
     }
 }
 
@@ -271,11 +289,16 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
     } else {
         None
     };
-    let mut builder = Endpoint::builder(presets::N0).secret_key(sk);
-    if let Some(m) = crate::util::relay_mode(&state.console.relays, state.console.relays_n0_fallback)? {
-        builder = builder.relay_mode(m);
-    }
-    let ep = builder.bind().await.ctx("start endpoint")?;
+    let relay_mode = crate::util::relay_mode(&state.console.relays, state.console.relays_n0_fallback)?;
+    let builder = || {
+        let mut b = Endpoint::builder(presets::N0).secret_key(sk.clone());
+        if let Some(m) = relay_mode.clone() {
+            b = b.relay_mode(m);
+        }
+        b
+    };
+    // On the UDP port the router forwards here, when one is known (set by hand, or found by probing).
+    let ep = crate::util::bind_endpoint(builder, state.console.udp_port).await?;
     let c = Arc::new(Console {
         me,
         open,
@@ -303,6 +326,7 @@ pub async fn start(open: bool) -> Result<Arc<Console>> {
         crate::ssh::start(c.clone()).await;
         tokio::spawn(manager(c.clone()));
         tokio::spawn(directory_loop(c.clone()));
+        tokio::spawn(probe_loop(c.clone()));
         tokio::spawn(watch_file(c.clone()));
         clog(&format!("{} open on 127.0.0.1:{port}, id {me}", crate::version_line()));
     }
@@ -373,6 +397,12 @@ impl Console {
 
     pub(crate) fn secret_key(&self) -> Result<SecretKey> {
         store::secret_from_hex(&self.state.lock().unwrap().console.key)
+    }
+
+    /// A machine's name, whatever its network.
+    pub(crate) fn node_name_any(&self, node: &str) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        st.networks.iter().flat_map(|n| n.nodes.iter()).find(|x| x.id == node).map(|x| x.name.clone())
     }
 
     pub(crate) fn node_name(&self, net: &str, node: &str) -> Option<String> {
@@ -765,6 +795,168 @@ impl Console {
         nodes.sort_by_key(|x| std::cmp::Reverse((live.contains_key(&x.id), x.last_seen)));
         Some((key, Directory { consoles: self.console_ids(n), nodes: nodes.into_iter().map(|x| x.id.clone()).collect() }))
     }
+}
+
+/// Open console: look once for a UDP port the router forwards to this computer (then iroh binds it at the
+/// next start, and machines behind a NAT that gives a port per destination, like mobile networks, can reach
+/// this console directly). Again only when the public IPv4 address changes, or when asked (`net_probe`).
+async fn probe_loop(c: Arc<Console>) {
+    tokio::time::sleep(Duration::from_secs(90)).await;
+    loop {
+        if let Err(e) = probe_ports(&c, false).await {
+            clog(&format!("port probe: {e:#}"));
+        }
+        tokio::time::sleep(Duration::from_secs(600)).await;
+    }
+}
+
+/// The probe: a machine outside this network (another public address, or reached through a relay) sends a
+/// datagram with a token to ports of this computer's public IPv4, as [`proto::probe_plan`] lays them out
+/// (at most 4096 a request, paced by the machine); the first port where one arrives is the one. Automatic
+/// only while no port has been found (forwards stay when the address changes); `again`: asked, always.
+/// Returns the port (or none) and records it in `gangli.console`.
+async fn probe_ports(c: &Arc<Console>, again: bool) -> Result<Option<u16>> {
+    static PROBING: AtomicBool = AtomicBool::new(false);
+    if PROBING.swap(true, Ordering::SeqCst) {
+        bail!("already looking for a forwarded port");
+    }
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            PROBING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _done = Done;
+    let (by_hand, found_before, probed) = {
+        let st = c.state.lock().unwrap();
+        let k = &st.console;
+        (k.udp_port.is_some() && !k.udp_port_found, k.udp_port_found, k.udp_probed.clone())
+    };
+    if by_hand {
+        if again {
+            bail!("the UDP port is set by hand in gangli.console");
+        }
+        return Ok(None);
+    }
+    let net = crate::util::net_info(c.endpoint());
+    let Some(ip) = net.public_v4.rsplit_once(':').map(|(ip, _)| ip.to_string()) else {
+        if again {
+            bail!("no public IPv4 address known yet (no UDP to the relays?)");
+        }
+        return Ok(None);
+    };
+    if !again && (found_before || probed == ip) {
+        return Ok(None);
+    }
+    let away: Vec<String> = {
+        let st = c.state.lock().unwrap();
+        st.networks
+            .iter()
+            .flat_map(|n| n.nodes.iter())
+            .filter(|x| x.inventory.as_ref().is_some_and(|i| i.net.public_v4.rsplit_once(':').is_some_and(|(theirs, _)| theirs != ip)))
+            .map(|x| x.id.clone())
+            .collect()
+    };
+    let prober = {
+        let elsewhere = |id: &str| away.iter().any(|a| a == id);
+        let live = c.live.lock().unwrap();
+        let pick = |want: &dyn Fn(&str, &Live) -> bool| live.iter().find(|(id, l)| want(id.as_str(), l)).map(|(id, l)| (id.clone(), l.conn.clone()));
+        pick(&|id, _| elsewhere(id)).or_else(|| pick(&|_, l| proto::path_info(&l.conn).is_some_and(|p| p.relay)))
+    };
+    let Some((prober, conn)) = prober else {
+        if again {
+            bail!("no machine outside this network is online now to send the probes");
+        }
+        return Ok(None);
+    };
+    let by = c.node_name_any(&prober).unwrap_or_default();
+    clog(&format!("looking for a UDP port the router forwards here (public address {ip}, probes from {by})"));
+    let token = format!("gangli-probe-{}", HEXLOWER.encode(&random16()));
+    let mut queue: std::collections::VecDeque<Vec<u16>> = proto::probe_plan().into();
+    let mut found = None;
+    while let Some(mut ports) = queue.pop_front() {
+        ports.retain(|p| *p != net.port);
+        // Ports this computer cannot listen on (in use, below 1024 without the right) are left out; when it
+        // runs out of sockets (a low open-files limit), the rest goes into the next request.
+        let mut socks: Vec<(u16, std::net::UdpSocket)> = vec![];
+        for (i, p) in ports.iter().enumerate() {
+            match std::net::UdpSocket::bind(("0.0.0.0", *p)) {
+                Ok(s) => {
+                    if s.set_nonblocking(true).is_ok() {
+                        socks.push((*p, s));
+                    }
+                }
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrNotAvailable) => {}
+                Err(_) if !socks.is_empty() => {
+                    queue.push_front(ports[i..].to_vec());
+                    break;
+                }
+                Err(e) => bail!("listen on UDP port {p}: {e}"),
+            }
+        }
+        if socks.is_empty() {
+            continue;
+        }
+        let list: Vec<u16> = socks.iter().map(|(p, _)| *p).collect();
+        let wait = Duration::from_secs(20 + (list.len() / proto::PROBE_RATE) as u64);
+        let (mut send, mut recv) = conn.open_bi().await.ctx("ask the machine")?;
+        proto::write_frame(&mut send, &Req::ProbeUdp { ip: ip.clone(), ports: list, token: token.clone() }).await?;
+        match tokio::time::timeout(wait, proto::read_frame::<_, Resp>(&mut recv)).await {
+            Ok(Ok(Resp::Probed { .. })) => {}
+            Ok(Ok(Resp::Error { message })) => bail!("{message}"),
+            _ => bail!("{by} did not send the probes"),
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let mut buf = [0u8; 80];
+        let mut hits = vec![];
+        for (p, s) in &socks {
+            while let Ok((n, _)) = s.recv_from(&mut buf) {
+                if &buf[..n] == token.as_bytes() && !hits.contains(p) {
+                    hits.push(*p);
+                }
+            }
+        }
+        // A port of its own rather than a well-known one, when there is the choice.
+        hits.sort_by_key(|p| (*p < 1024, *p));
+        if let Some(p) = hits.first() {
+            found = Some(*p);
+            break;
+        }
+    }
+    {
+        let mut st = c.state.lock().unwrap();
+        st.console.udp_probed = ip.clone();
+        if let Some(p) = found {
+            st.console.udp_port = Some(p);
+            st.console.udp_port_found = true;
+        }
+    }
+    c.save();
+    match found {
+        Some(p) => clog(&format!("UDP port {p} is forwarded here: used from the next start")),
+        None if found_before => clog("no other UDP port is forwarded here: the one found before stays"),
+        None => clog("no UDP port is forwarded here"),
+    }
+    Ok(found)
+}
+
+/// How this console reaches the Internet, and its UDP port: `port` the one in use, `fixed` the one in
+/// `gangli.console` (`found`: by the probe, else by hand), `restart`: a restart would move to it.
+fn net_status(c: &Console, k: &ConsoleConf) -> Value {
+    let n = crate::util::net_info(c.endpoint());
+    json!({
+        "udp_v4": n.udp_v4,
+        "udp_v6": n.udp_v6,
+        "public_v4": n.public_v4,
+        "public_v6": n.public_v6,
+        "nat_varies": n.nat_varies,
+        "summary": n.summary(),
+        "port": n.port,
+        "fixed": k.udp_port,
+        "found": k.udp_port_found,
+        "probed": k.udp_probed,
+        "restart": k.udp_port.is_some_and(|p| p != n.port),
+    })
 }
 
 /// Read the directory, merge it, sync with the consoles listed there, publish if what we know differs.
@@ -1233,6 +1425,8 @@ fn api_help(c: &Console) -> Value {
             op("network_relays", "read / admin with set", json!({ "name": "network", "set": "optional list of https:// relay URLs ([] clears)" }), "a network's extra iroh relays (on top of the n0 ones), sent to its machines"),
             op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
             op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "folder with the release binaries" }), "send machines a new gangli"),
+            op("net_probe", "admin", json!({}), "look for a UDP port the router forwards to this computer (a machine outside sends the probes; about a minute at most); found: used from the next start. `status` shows the network (public addresses, NAT, UDP port)"),
+            op("restart", "admin", json!({}), "restart this gangli (window and console), e.g. to use the UDP port just found"),
             op("stop", "admin", json!({}), "close this console"),
         ],
     })
@@ -1362,7 +1556,13 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 "open": c.open,
                 "relay": c.home_relay(),
                 "networks": nets,
+                "net": net_status(c, &st.console),
             }))
+        }
+        IpcOp::NetProbe => {
+            let port = probe_ports(c, true).await?;
+            let st = c.state.lock().unwrap();
+            Ok(json!({ "found": port, "net": net_status(c, &st.console) }))
         }
         IpcOp::NetworkBundle { names } => {
             let st = c.state.lock().unwrap();
@@ -1794,6 +1994,16 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 });
             }
             Ok(json!({ "updated": swapped, "restarting": swapped && c.open, "version_was": crate::build_version() }))
+        }
+        IpcOp::Restart => {
+            if !c.open {
+                bail!("no open console to restart (start the window or `gangli console run`)");
+            }
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                crate::update::restart();
+            });
+            Ok(json!({ "restarting": true }))
         }
         IpcOp::Update { nodes, from } => {
             let dir = std::path::PathBuf::from(&from);

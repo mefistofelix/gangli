@@ -538,6 +538,12 @@ impl App {
                             self.toast(format!("{name}: {}", s(&r["error"])), true);
                         }
                     }
+                } else if v.get("found").is_some() {
+                    // net_probe
+                    match v["found"].as_u64() {
+                        Some(p) => self.toast(format!("UDP port {p} is forwarded to this computer"), false),
+                        None => self.toast("No UDP port forwarded to this computer was found", false),
+                    }
                 } else if !msg.is_empty() {
                     self.toast(msg, false);
                 }
@@ -898,10 +904,16 @@ impl App {
                 if n.online {
                     row("Link", format!("{} {} ms", if p.relay { "through a relay," } else { "direct," }, p.rtt_ms));
                     row("Traffic", format!("↓ {}  ↑ {}", super::term::rate(p.rx_bps), super::term::rate(p.tx_bps)));
+                    if !p.paths.is_empty() {
+                        row("Paths", p.paths.join("\n"));
+                    }
                 }
             }
             if !inv.relay.is_empty() {
                 row("Its relay", relay_host(&inv.relay));
+            }
+            if inv.net != crate::inventory::NetInfo::default() {
+                row("Its network", inv.net.summary());
             }
         });
 
@@ -1262,6 +1274,8 @@ impl App {
             }
         }
         ui.add_space(14.0);
+        self.network_section(ui);
+        ui.add_space(14.0);
         ui.label(RichText::new("Files").strong());
         ui.label(RichText::new("Everything gangli keeps is in these files next to it:").weak());
         for p in [crate::paths::node_file(), crate::paths::console_file(), crate::paths::log_file()] {
@@ -1271,6 +1285,46 @@ impl App {
             reveal(&crate::paths::console_file());
         }
         let _ = exe_dir;
+    }
+
+    /// How this computer's console reaches the Internet: addresses, NAT, its UDP port (and a forwarded one).
+    fn network_section(&mut self, ui: &mut Ui) {
+        let n = self.status["net"].clone();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Network").strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if n["restart"].as_bool() == Some(true) && ui.button("Restart gangli").on_hover_text("To use the UDP port set for this computer").clicked() {
+                    self.call(Tag::Done("gangli restarts".into()), IpcOp::Restart);
+                }
+                if ui
+                    .button("Look for a forwarded port")
+                    .on_hover_text("A machine outside (another place, a phone network) sends probes to this computer's public address: a port the router forwards here makes direct links possible even with machines behind a mobile network")
+                    .clicked()
+                {
+                    self.toast("Looking for a UDP port the router forwards here (up to a minute)…", false);
+                    self.call(Tag::Done(String::new()), IpcOp::NetProbe);
+                }
+            });
+        });
+        if n.is_null() {
+            ui.label(RichText::new("…").weak());
+            return;
+        }
+        egui::Grid::new("net").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+            let mut row = |k: &str, v: String| {
+                ui.label(RichText::new(k).weak());
+                ui.add(egui::Label::new(v).wrap());
+                ui.end_row();
+            };
+            row("Internet", s(&n["summary"]).to_string());
+            row("UDP port", crate::console_cmd::udp_port_text(&n));
+        });
+        ui.label(
+            RichText::new(
+                "Machines link directly when one side can be reached from outside: IPv6 on both, a UDP port the router forwards here (found by itself), or the router's UPnP. Otherwise through a relay.",
+            )
+            .weak(),
+        );
     }
 
     /// Show a pairing QR and look for the phone's answer in the background (pair.rs).

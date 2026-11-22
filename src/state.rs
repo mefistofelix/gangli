@@ -49,6 +49,9 @@ pub struct NodeConf {
     /// 7374; none in the development mode (`GANGLI_DATA_DIR`) unless set here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_port: Option<u16>,
+    /// A fixed UDP port for its endpoint (one the router forwards here); none: a random one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port: Option<u16>,
 }
 
 pub const STATUS_PORT: u16 = 7374;
@@ -82,6 +85,7 @@ impl Default for NodeConf {
             relays_n0_fallback: true,
             window_node: true,
             status_port: None,
+            udp_port: None,
         }
     }
 }

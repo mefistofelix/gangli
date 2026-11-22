@@ -513,6 +513,40 @@ pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
 
 /// `gangli self-update --from <binary or release folder>`: through the open console (which restarts on it),
 /// else here (the gangli of this folder, a service too, restarts on it within 30 s).
+/// `gangli net [--probe]`.
+pub fn net(probe: bool, json: bool) -> Result<()> {
+    let v = ipc::call(if probe { IpcOp::NetProbe } else { IpcOp::Status })?;
+    let n = &v["net"];
+    if json {
+        print_json(n);
+        return Ok(());
+    }
+    println!("{}", n["summary"].as_str().unwrap_or(""));
+    if let Some(a) = n["public_v4"].as_str().filter(|a| !a.is_empty()) {
+        println!("public IPv4: {a}");
+    }
+    if let Some(a) = n["public_v6"].as_str().filter(|a| !a.is_empty()) {
+        println!("public IPv6: {a}");
+    }
+    println!("{}", udp_port_text(n));
+    Ok(())
+}
+
+/// One line about the console's UDP port, for the CLI and the GUI.
+pub fn udp_port_text(n: &serde_json::Value) -> String {
+    let port = n["port"].as_u64().unwrap_or(0);
+    let fixed = n["fixed"].as_u64();
+    let found = n["found"].as_bool() == Some(true);
+    let probed = n["probed"].as_str().unwrap_or("");
+    match fixed {
+        Some(p) if p != port => format!("UDP port {port} now; {p} from the next start ({})", if found { "the router forwards it" } else { "set by hand" }),
+        Some(p) if found => format!("UDP port {p}: the router forwards it here"),
+        Some(p) => format!("UDP port {p} (set by hand)"),
+        None if !probed.is_empty() => format!("UDP port {port} (random): no port forwarded to this computer was found"),
+        None => format!("UDP port {port} (random); not yet probed for a forwarded port"),
+    }
+}
+
 pub fn self_update(from: String, json: bool) -> Result<()> {
     let from = std::fs::canonicalize(&from).map(|p| p.display().to_string()).unwrap_or(from);
     let v = ipc::call(IpcOp::SelfUpdate { from })?;
