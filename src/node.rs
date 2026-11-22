@@ -383,6 +383,26 @@ fn spawn_knock_round(router: &Router, sessions: &Arc<Sessions>, inflight: &Arc<M
     }
     let (router, sessions, inflight, m) = (router.clone(), sessions.clone(), inflight.clone(), m.clone());
     tokio::spawn(async move {
+        // A knock that finds no console (the network not up yet right after a start or a wake, a console
+        // restarting) is tried again a few times, 5 s to 80 s apart, then left to the next event or to the
+        // console: never a periodic call while no console is open.
+        for wait in [0u64, 5, 10, 20, 40, 80] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            if sessions.has_network(&m.id) {
+                break;
+            }
+            if knock_round(&router, &sessions, &m, &inv, use_dir).await {
+                break;
+            }
+        }
+        inflight.lock().unwrap().remove(&key);
+    });
+}
+
+/// One knock on the network's known consoles (and those of its directory if none answers and `use_dir`):
+/// whether one took the session.
+async fn knock_round(router: &Router, sessions: &Arc<Sessions>, m: &Membership, inv: &Inventory, use_dir: bool) -> bool {
+    {
         let mut tried: HashSet<String> = HashSet::new();
         let mut targets = m.consoles.clone();
         let mut looked_up = false;
@@ -406,13 +426,12 @@ fn spawn_knock_round(router: &Router, sessions: &Arc<Sessions>, inflight: &Arc<M
                 }
             }
             if any || !use_dir || looked_up {
-                break;
+                return any;
             }
             looked_up = true;
             targets = directory_consoles(&m.id).await;
         }
-        inflight.lock().unwrap().remove(&key);
-    });
+    }
 }
 
 /// Keep knocking on the directory's consoles until one admits this node (capped backoff), then serve it.
