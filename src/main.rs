@@ -75,7 +75,7 @@ enum Command {
     /// node: install the node as a system service, started at boot, full access (one elevation prompt).
     Install {
         /// Public network code; default: the one embedded in the binary, if any.
-        #[arg(long, alias = "invite", alias = "join")]
+        #[arg(long)]
         code: Option<String>,
         /// Run the service as this account instead of SYSTEM / root (sessions only as that user).
         #[arg(long)]

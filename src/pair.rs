@@ -2,14 +2,13 @@
 //! on the machine, no port opened anywhere.
 //!
 //! 1. The machine shows a QR with a fresh random 32-byte seed: the URL of the gangli wallet (a static web page
-//!    that keeps public network codes only, in the phone's browser) with `#pair=<seed>&v=2&name=<machine>`.
+//!    that keeps public network codes only, in the phone's browser) with `#pair=<seed>&name=<machine>`.
 //! 2. The phone's camera opens the wallet; you tick one or more of its networks. The wallet encrypts them
 //!    with AES-256-GCM under `SHA-256("gangli-pair-v1" | seed)` and publishes the result on the pkarr relays,
 //!    signed by the ed25519 key whose seed is the seed (TXT `_gangli`, parts `a…`, `b…` of the base32 of
 //!    `nonce | ciphertext`, as the network directory does).
-//!    Plaintext v2 (QR with `v=2`): `0x02`, then per network the 49 bytes of its public code, a name length
-//!    byte and the name as the phone calls it (UTF-8, at most 24 bytes); at most 6 networks (a pkarr packet
-//!    holds 1000 bytes). v1 (a QR without `v`, gangli build-11): the text of one public code.
+//!    Plaintext: `0x02`, then per network the 49 bytes of its public code, a name length byte and the name as
+//!    the phone calls it (UTF-8, at most 24 bytes); at most 6 networks (a pkarr packet holds 1000 bytes).
 //! 3. The machine polls that key on the relays only while its QR is on screen and decrypts; the person at
 //!    the machine confirms (GUI dialog, or `gangli pair` in a terminal) and it joins; a console of each
 //!    network admits it as usual.
@@ -82,11 +81,11 @@ impl Pairing {
         Pairing { seed }
     }
 
-    /// What the machine's QR carries: the seed, the message version this machine reads, its name (for the
-    /// wallet's "Add <name> to these networks").
+    /// What the machine's QR carries: the seed and the machine's name (for the wallet's "Add <name> to
+    /// these networks").
     pub fn url(&self) -> String {
         let host = crate::util::short_host(&sysinfo::System::host_name().unwrap_or_default()).to_string();
-        format!("{}#pair={}&v=2&name={}", wallet_url(), BASE32_NOPAD.encode(&self.seed).to_ascii_lowercase(), crate::ssh::url_encode(&host))
+        format!("{}#pair={}&name={}", wallet_url(), BASE32_NOPAD.encode(&self.seed).to_ascii_lowercase(), crate::ssh::url_encode(&host))
     }
 
     /// The key the wallet publishes under.
@@ -112,20 +111,19 @@ impl Pairing {
         let mut buf = blob[12..].to_vec();
         let plain = key.open_in_place(nonce, Aad::empty(), &mut buf).map_err(|_| anyhow!("pairing message not for this machine"))?;
         let mut offers: Vec<Offer> = vec![];
-        if plain.first() == Some(&2) {
-            let mut p = &plain[1..];
-            while !p.is_empty() {
-                if p.len() < 50 || offers.len() >= MAX_OFFERS {
-                    return Err(bad());
-                }
-                let code = BASE32_NOPAD.encode(&p[..49]).to_ascii_lowercase();
-                let n = p[49] as usize;
-                let name = p.get(50..50 + n).ok_or_else(bad)?;
-                offers.push(Offer { code, name: String::from_utf8_lossy(name).chars().filter(|c| !c.is_control()).collect() });
-                p = &p[50 + n..];
+        if plain.first() != Some(&2) {
+            return Err(bad());
+        }
+        let mut p = &plain[1..];
+        while !p.is_empty() {
+            if p.len() < 50 || offers.len() >= MAX_OFFERS {
+                return Err(bad());
             }
-        } else {
-            offers.push(Offer { code: String::from_utf8(plain.to_vec()).map_err(|_| bad())?.trim().to_string(), name: String::new() });
+            let code = BASE32_NOPAD.encode(&p[..49]).to_ascii_lowercase();
+            let n = p[49] as usize;
+            let name = p.get(50..50 + n).ok_or_else(bad)?;
+            offers.push(Offer { code, name: String::from_utf8_lossy(name).chars().filter(|c| !c.is_control()).collect() });
+            p = &p[50 + n..];
         }
         if offers.is_empty() {
             return Err(bad());
@@ -205,13 +203,18 @@ mod tests {
         let net = SecretKey::generate();
         let public = crate::code::public_code(&net);
         let p = Pairing::new();
-        // v1: one code (the wallet of build-11)
-        assert_eq!(p.open(&p.seal(public.as_bytes(), [7; 12])).unwrap(), vec![Offer { code: public.clone(), name: String::new() }]);
+        let msg = p.seal(&v2(&[(&public, "")]), [7; 12]);
+        assert_eq!(p.open(&msg).unwrap(), vec![Offer { code: public.clone(), name: String::new() }]);
         // another machine's seed cannot read it
-        assert!(Pairing::new().open(&p.seal(public.as_bytes(), [7; 12])).is_err());
+        assert!(Pairing::new().open(&msg).is_err());
+        // a bare code (not the format) is refused
+        assert!(p.open(&p.seal(public.as_bytes(), [7; 12])).is_err());
         // a private code is refused even when correctly encrypted
-        assert!(p.open(&p.seal(crate::code::private_code(&net).as_bytes(), [7; 12])).is_err());
-        assert!(p.url().contains("#pair=") && p.url().contains("&v=2&name="));
+        let mut private = vec![2u8];
+        private.extend(BASE32_NOPAD.decode(crate::code::private_code(&net).to_ascii_uppercase().as_bytes()).unwrap());
+        private.push(0);
+        assert!(p.open(&p.seal(&private, [7; 12])).is_err());
+        assert!(p.url().contains("#pair=") && p.url().contains("&name="));
     }
 
     #[test]
@@ -238,6 +241,6 @@ mod tests {
         assert_eq!(data_encoding::HEXLOWER.encode(p.key().public().as_bytes()), "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c");
         // the name the wallet publishes under (pkarr's z-base32 of that key)
         assert_eq!(pkarr::Keypair::from_secret_key(&[1; 32]).public_key().to_string(), "tkrq8zmwb8a3m9k15csu3q17qmfgqnp9dskbrg9uq1rydpyxp7qy");
-        assert!(p.url().contains("#pair=aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq&v=2&name="));
+        assert!(p.url().contains("#pair=aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq&name="));
     }
 }

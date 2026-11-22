@@ -48,6 +48,9 @@ when a decision changes.
   (PuTTY, ssh, a forward) is a regression.
 - **LLM friendly**: every CLI command supports `--json`, has stable exit codes and never prompts when stdin
   is not a terminal; the API never takes passwords, only tokens approved in the GUI.
+- **No backward compatibility, ever** **[decided 2026-11-22]**: gangli is new and the owner's own; change a
+  protocol, file format, QR or CLI outright and delete the old path (no old formats, aliases, migrations or
+  "older gangli" fallbacks).
 - Third-party code adapted from osewa / pigeons / iroh examples keeps its license notice (Apache-2.0 / MIT).
 
 ## Layout

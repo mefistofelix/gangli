@@ -116,12 +116,6 @@ pub fn run(hidden: bool) -> Result<()> {
         glog("another gangli window is open: brought it up");
         return Ok(());
     }
-    // An older gangli open in this folder.
-    if let Ok(Some(v)) = crate::ipc::call_open(crate::ipc::IpcOp::GuiShow) {
-        if v["shown"].as_bool() == Some(true) {
-            return Ok(());
-        }
-    }
     #[cfg(windows)]
     hide_own_console();
     let client = client::Client::start()?;

@@ -117,7 +117,7 @@ pub enum Req {
         #[serde(default)]
         relays: Option<Relays>,
     },
-    /// `relays`: the network's extra relays, when the console knows them (older nodes ignore the field).
+    /// `relays`: the network's extra relays, when a console set them.
     Hello {
         cert: Cert,
         consoles: Vec<String>,
@@ -191,8 +191,8 @@ pub enum Frame {
     Pong,
     /// Node → console, only when the stable part of the inventory changed.
     Inventory { inventory: Inventory },
-    /// Console → node: the consoles the node may knock on and, when known, the network's extra relays. New
-    /// settings ride on this frame as optional fields: a node that does not know a frame drops the session.
+    /// Console → node: the consoles the node may knock on and, when a console set them, the network's extra
+    /// relays (`None`: never set, the node keeps what it has).
     Consoles {
         ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

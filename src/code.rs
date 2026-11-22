@@ -54,10 +54,8 @@ pub fn private_code(key: &SecretKey) -> String {
 }
 
 pub fn decode(s: &str) -> Result<Code> {
-    // Tolerant to spaces, case, and a leftover `gangli-pub-` / `gangli-key-` prefix from an old copy.
-    let s: String = s.trim().chars().filter(|c| !c.is_whitespace()).collect();
-    let lower = s.to_ascii_lowercase();
-    let body = lower.strip_prefix("gangli-pub-").or_else(|| lower.strip_prefix("gangli-key-")).unwrap_or(&lower).to_ascii_uppercase();
+    // Tolerant to spaces and case (codes get copied around by hand).
+    let body: String = s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase();
     let Ok(raw) = BASE32_NOPAD.decode(body.as_bytes()) else {
         bail!("not a gangli code (bad characters)");
     };
@@ -95,9 +93,8 @@ mod tests {
         let Code::Public { network, join } = decode(&s).unwrap() else { panic!() };
         assert_eq!(network, key.public());
         assert_eq!(join, join_secret(&key));
-        // tolerant to case, spaces and a leftover prefix
+        // tolerant to case and spaces
         assert!(matches!(decode(&format!("  {} ", s.to_uppercase())).unwrap(), Code::Public { .. }));
-        assert!(matches!(decode(&format!("gangli-pub-{s}")).unwrap(), Code::Public { .. }));
         // a public code is refused where a private one is expected (and the other way round)
         assert!(matches!(decode(&s).unwrap(), Code::Public { .. }));
         assert!(matches!(decode(&private_code(&key)).unwrap(), Code::Private { .. }));
@@ -129,7 +126,8 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        assert!(decode("gangli-pub-hello").is_err());
+        assert!(decode("hello-world").is_err());
+        assert!(decode(&format!("gangli-pub-{}", public_code(&SecretKey::generate()))).is_err());
         assert!(decode("").is_err());
     }
 }

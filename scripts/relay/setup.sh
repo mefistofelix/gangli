@@ -81,11 +81,6 @@ OOMScoreAdjust=-500
 WantedBy=multi-user.target
 EOF
 
-# an earlier version used certbot for an IP certificate: gone
-if snap list certbot > /dev/null 2>&1; then sudo snap remove --purge certbot > /dev/null; fi
-sudo rm -rf /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /usr/local/bin/certbot \
-  /var/lib/iroh-relay/default.crt /var/lib/iroh-relay/default.key
-
 # ---- keep-alive: Oracle reclaims an Always Free instance when, over 7 days, CPU (95th percentile), network
 # and memory (A1 shapes) all stay below 20% ----
 sudo tee /usr/local/bin/oci-keepalive > /dev/null <<'EOF'
@@ -140,7 +135,6 @@ EOF
 # ---- knock daemon (scripts/relay/knockd.py; key and port copied beforehand) ----
 [ -f /tmp/knockd.py ] && sudo install -m 0755 /tmp/knockd.py /usr/local/bin/knockd.py && rm -f /tmp/knockd.py
 [ -x /usr/local/bin/knockd.py ] && [ -f /etc/knockd.key ] && [ -f /etc/knockd.env ] || { echo "copy knockd.py, /etc/knockd.key and /etc/knockd.env first"; exit 2; }
-sudo rm -f /etc/modules-load.d/knock.conf  # an earlier version used iptables' xt_recent
 sudo tee /etc/systemd/system/knockd.service > /dev/null <<'EOF'
 [Unit]
 Description=Single-packet knock for SSH (no listening port)

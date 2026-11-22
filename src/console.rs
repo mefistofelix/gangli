@@ -1673,9 +1673,6 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 let r: Result<String> = async {
                     let inv = c.state.lock().unwrap().networks.iter().flat_map(|n| n.nodes.iter()).find(|x| x.id == id).and_then(|x| x.inventory.clone());
                     let inv = inv.ok_or_else(|| anyhow!("not online"))?;
-                    if inv.platform.is_empty() {
-                        bail!("it runs an older gangli without updates: replace its binary by hand once");
-                    }
                     let asset = crate::update::asset_for(&inv.platform, &inv.arch).ok_or_else(|| anyhow!("no release for {} {}", inv.platform, inv.arch))?;
                     let bytes = tokio::fs::read(dir.join(asset)).await.with_context(|| format!("{asset} not in {from}"))?;
                     crate::update::check(&bytes, &inv.platform, &inv.arch)?;
@@ -1720,13 +1717,6 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             let conn = c.live_conn(&id).ok_or_else(|| anyhow!("no live session with {node}"))?;
             conn.close(0u32.into(), b"debug drop");
             Ok(json!({ "dropped": node }))
-        }
-        IpcOp::GuiShow => {
-            let gui = c.gui.load(std::sync::atomic::Ordering::SeqCst);
-            if gui {
-                c.gui_show.notify_one();
-            }
-            Ok(json!({ "shown": gui }))
         }
         IpcOp::GuiWindow { x, y, w, h } => {
             if !(w.is_finite() && h.is_finite() && x.is_finite() && y.is_finite()) || w < 200.0 || h < 150.0 {

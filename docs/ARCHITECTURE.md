@@ -111,7 +111,7 @@ CLI names: node side `node`, `install`, `uninstall`, `join`, `leave`, `status`; 
     reaches a node homed on ours, and the list does **not** belong in the network codes: codes are printed,
     embedded and kept in the phone wallet, and would all go stale when a relay changes.
   - The console sends the list to the network's machines over the authenticated session (`Hello`, then the
-    `Consoles` frame when it changes; optional fields, so older nodes ignore them); each node keeps it per
+    `Consoles` frame when it changes); each node keeps it per
     membership in `gangli.node` and uses the union of its networks' lists, added at runtime
     (`Endpoint::insert_relay`) on top of the n0 ones: a console can add relays, never take the n0 ones away.
   - Consoles of a network: the most recent setting wins (`relays_at`), carried by `Sync`. A console uses the
@@ -373,13 +373,12 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
     wallet's address and `#net=<public code>&name=…`: scanned with the phone's camera, the wallet opens and
     keeps that network. Private codes are never put in a QR, and the wallet refuses them.
   - On the machine: *This computer → Pair with your phone* (or `gangli pair`) shows a QR with the wallet's
-    address and `#pair=<random 32-byte seed>&v=2&name=<machine>`. Scanned with the phone's camera, the wallet
+    address and `#pair=<random 32-byte seed>&name=<machine>`. Scanned with the phone's camera, the wallet
     opens on "Add <machine> to networks": you tick one or more networks and tap *Add*. The wallet encrypts them
     with AES-256-GCM under `SHA-256("gangli-pair-v1" | seed)` and publishes `nonce | ciphertext` on the **pkarr
     relays** (TXT `_gangli` in parts `a…`, `b…`, the directory's format), signed by the ed25519 key whose seed
-    is the seed. Plaintext v2: `0x02`, then per network its 49 code bytes, a name length and the phone's name
-    for it (≤ 24 bytes); at most 6 networks (a pkarr packet holds 1000 bytes: 6 with long names make 885). A QR
-    without `v` (build-11) gets v1, one public code as text. The machine polls that key **only while its QR is
+    is the seed. Plaintext: `0x02`, then per network its 49 code bytes, a name length and the phone's name
+    for it (≤ 24 bytes); at most 6 networks (a pkarr packet holds 1000 bytes: 6 with long names make 885). The machine polls that key **only while its QR is
     on screen** (every 3 s, at most 10 minutes), decrypts, checks that every code is a public one, and **asks
     the person at the machine to confirm** (GUI dialog with the networks ticked, or `[Y/n]` in a terminal;
     `gangli pair --yes` for scripts). Confirmed, it joins and its node runs (section 12); a console of each
@@ -447,8 +446,8 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   never shows them; Enter, Esc or Ctrl stop them until the next echo. Verified with 250 ms of `tc netem`
   delay each way.
 - The GUI **is** a console: it opens one in its process (owning the local port, the gateway, the tunnels).
-  If a console is already open in the folder: a GUI there is brought up instead (`GuiShow` over the local
-  API, the second process exits), a `gangli console run` is used through its local API.
+  A GUI already open on this computer is brought up instead (below); a `gangli console run` open in the
+  folder is used through its local API.
 - Backends: eframe (winit + OpenGL) and tray-icon on Windows and macOS. Linux (static binary, no system
   libraries): X11 in pure Rust (x11rb's own connection; XWayland on Wayland desktops), egui drawn by a CPU
   rasterizer into PutImage strips, keyboard from the server keymap (AltGr levels, reloaded on

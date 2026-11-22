@@ -51,8 +51,6 @@ pub enum IpcOp {
     JobKill { node: String, job: String },
     Update { nodes: Vec<String>, from: String },
     DebugDrop { node: String },
-    /// Bring the GUI window of this console up (a second `gangli` was started in the folder).
-    GuiShow,
     /// The GUI window's size and place (points), kept in `gangli.console` for the next start.
     GuiWindow { x: f32, y: f32, w: f32, h: f32 },
     Stop,
@@ -75,7 +73,7 @@ impl IpcOp {
             // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::Stop => Some("admin"),
-            IpcOp::DebugDrop { .. } | IpcOp::GuiShow | IpcOp::GuiWindow { .. } => None,
+            IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } => None,
         }
     }
@@ -136,7 +134,7 @@ pub fn call(op: IpcOp) -> Result<Value> {
 
 /// A gangli window already open on this computer, from any folder: asks it to come up. Tries this folder's
 /// console port, then the default one. `Some(true)`: it is up now; `Some(false)`: a console without a window
-/// answered there; `None`: nobody (or an older gangli that does not know the request).
+/// answered there; `None`: nobody.
 pub fn show_running_gui() -> Option<bool> {
     let mut ports = vec![];
     if let Ok(st) = crate::store::load::<crate::console::ConsoleState>(&crate::paths::console_file()) {

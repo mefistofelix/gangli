@@ -139,7 +139,7 @@ const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join(""
 
 // ---- codes: kind byte 1 = public (49 bytes), 2 = private (37 bytes) ----
 function parseCode(text) {
-  let s = (text || "").replace(/\s+/g, "").toLowerCase().replace(/^gangli-(pub|key)-/, "");
+  const s = (text || "").replace(/\s+/g, "").toLowerCase();
   if (!/^[a-z2-7]+$/.test(s)) return { error: "This is not a gangli code." };
   let raw; try { raw = b32decode(s); } catch { return { error: "This is not a gangli code." }; }
   if (raw[0] === 2 && raw.length === 37) return { private: true };
@@ -183,10 +183,9 @@ function dnsTxtPacket(name, texts, ttl) {
   });
   return cat(...parts);
 }
-// What the machine reads (src/pair.rs): v2 = 0x02, then per network its 49 code bytes, a name length, the name
-// (UTF-8, at most 24 bytes); v1 (older machines) = the text of one public code.
-function pairingPlaintext(nets, v) {
-  if (v < 2) return enc.encode(nets[0].code);
+// What the machine reads (src/pair.rs): 0x02, then per network its 49 code bytes, a name length, the name
+// (UTF-8, at most 24 bytes).
+function pairingPlaintext(nets) {
   const parts = [new Uint8Array([2])];
   for (const n of nets) {
     let name = new Uint8Array(0);
@@ -195,7 +194,7 @@ function pairingPlaintext(nets, v) {
   }
   return cat(...parts);
 }
-async function sendToMachine(seedText, nets, v) {
+async function sendToMachine(seedText, nets) {
   if (!crypto.subtle) throw new Error("This page needs a secure (https) connection.");
   const seed = b32decode(seedText);
   if (seed.length !== 32) throw new Error("This pairing QR is damaged: show it again on the machine.");
@@ -203,7 +202,7 @@ async function sendToMachine(seedText, nets, v) {
   try { keys = await pairingKeys(seed); } catch { throw new Error("This browser cannot sign (Ed25519): update it, or use another browser."); }
   const aes = await crypto.subtle.importKey("raw", keys.aes, "AES-GCM", false, ["encrypt"]);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aes, pairingPlaintext(nets, v)));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aes, pairingPlaintext(nets)));
   // TXT strings hold 255 bytes: parts `a…`, `b…` of 240 characters, as gangli's directory does
   const text = b32encode(cat(nonce, sealed), B32), texts = [];
   for (let i = 0; i * 240 < text.length; i++) texts.push(String.fromCharCode(97 + i) + text.slice(i * 240, (i + 1) * 240));
@@ -239,7 +238,7 @@ function render() {
 }
 // A machine scanned while this phone had no network yet: kept for 10 minutes (as long as the machine waits),
 // so that saving a network right after offers to send it, without scanning the machine again.
-const PENDING = "gangli.pending-pair.v2";
+const PENDING = "gangli.pending-pair";
 function setPending(m) { try { localStorage.setItem(PENDING, JSON.stringify({ ...m, until: Date.now() + 10 * 60 * 1000 })); } catch {} }
 function getPending() {
   try { const p = JSON.parse(localStorage.getItem(PENDING) || "null"); if (p && p.until > Date.now() && p.seed) return p; localStorage.removeItem(PENDING); } catch {}
@@ -247,7 +246,7 @@ function getPending() {
 }
 function clearPending() { try { localStorage.removeItem(PENDING); } catch {} }
 
-// A machine's QR: `m` = { seed, v (message version it reads), name }.
+// A machine's QR: `m` = { seed, name }.
 function showPair(m) {
   const who = (m.name || "").trim() || "the machine";
   $("pair").hidden = false;
@@ -260,11 +259,8 @@ function showPair(m) {
     say("pair-msg", "info", `This phone has no network yet. On your computer, open gangli → Networks → Codes and scan that QR with this phone: the network is saved, and you can add ${who} right away (no need to scan it again).`);
     return;
   }
-  const several = m.v >= 2;
   $("pair-hint").hidden = false;
-  $("pair-hint").textContent = several
-    ? `Tick the networks for ${who}, then tap Add. ${who} asks its user to confirm, then joins; a console of each network admits it.`
-    : `${who} runs an older gangli: one network at a time. Tick it, then tap Add.`;
+  $("pair-hint").textContent = `Tick the networks for ${who}, then tap Add. ${who} asks its user to confirm, then joins; a console of each network admits it.`;
   say("pair-msg", "", "");
   const send = document.createElement("button"); send.className = "big primary";
   const boxes = [];
@@ -276,7 +272,7 @@ function showPair(m) {
   for (const n of list) {
     const row = document.createElement("label"); row.className = "pick";
     const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = list.length === 1; cb.dataset.code = n.code;
-    cb.onchange = () => { if (!several && cb.checked) for (const o of boxes) if (o !== cb) o.checked = false; update(); };
+    cb.onchange = update;
     const nm = document.createElement("span"); nm.textContent = n.name;
     row.append(cb, nm); box.append(row); boxes.push(cb);
   }
@@ -285,7 +281,7 @@ function showPair(m) {
     for (const x of [...boxes, send]) x.disabled = true;
     say("pair-msg", "info", `Sending to ${who}…`);
     try {
-      await sendToMachine(m.seed, nets, m.v);
+      await sendToMachine(m.seed, nets);
       clearPending();
       say("pair-msg", "ok", `Sent. On ${who}, gangli now asks to join ${nets.map((n) => n.name).join(", ")}: confirm there.`);
     } catch (e) {
@@ -335,7 +331,7 @@ function route() {
   // a new QR scanned in the same tab: start from a clean screen
   $("saved").hidden = true; $("pair").hidden = true; say("msg", "", ""); say("pair-msg", "", ""); render();
   if (h.has("net")) saveFromLink(h.get("net"), h.get("name"));
-  else if (h.has("pair")) showPair({ seed: h.get("pair"), v: Number(h.get("v") || 1), name: h.get("name") || "" });
+  else if (h.has("pair")) showPair({ seed: h.get("pair"), name: h.get("name") || "" });
   else if (h.has("selftest")) selftest();
   // the fragment carries a one-use key: do not leave it in the address bar or the history
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
