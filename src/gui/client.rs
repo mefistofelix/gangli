@@ -35,6 +35,8 @@ pub enum Tag {
     Done(String),
     /// Another `gangli` was started in this folder: bring the window up.
     Show,
+    /// Housekeeping (the window's size and place saved): nothing to show, errors only logged.
+    Quiet,
 }
 
 pub struct Reply {

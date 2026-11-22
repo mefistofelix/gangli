@@ -14,16 +14,19 @@ use super::{App, TrayAction, TrayModel};
 
 pub fn run(client: Client, hidden: bool) -> Result<()> {
     let icon = egui::IconData { rgba: super::icon::rgba(64), width: 64, height: 64 };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("gangli")
-            .with_app_id("gangli")
-            .with_inner_size([1080.0, 700.0])
-            .with_min_inner_size([640.0, 420.0])
-            .with_icon(Arc::new(icon))
-            .with_visible(!hidden),
-        ..Default::default()
+    let saved = super::saved_geometry();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("gangli")
+        .with_app_id("gangli")
+        .with_min_inner_size([super::MIN_SIZE.0, super::MIN_SIZE.1])
+        .with_icon(Arc::new(icon))
+        .with_visible(!hidden);
+    viewport = match saved {
+        Some(g) => viewport.with_inner_size([g.w, g.h]).with_position([g.x, g.y]),
+        // Small enough for any screen until the first frame knows the screen's size (see `fit`).
+        None => viewport.with_inner_size([900.0, 580.0]),
     };
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "gangli",
         options,
@@ -32,6 +35,7 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
             let ctx = cc.egui_ctx.clone();
             app.set_waker(Arc::new(move || ctx.request_repaint()));
             let mut n = Native::new(app, &cc.egui_ctx);
+            n.fit = saved.is_none();
             // Hidden only when the tray can bring it back.
             if hidden && n.tray.is_some() {
                 n.visible = false;
@@ -60,6 +64,8 @@ struct Native {
     shot_done: Arc<std::sync::atomic::AtomicBool>,
     /// `GANGLI_GUI_TEST_TRAY`: close the window at 2 s (it must go to the tray), open it from the tray at 5 s.
     test_tray: u8,
+    /// No saved size: size and center the window for the screen once its size is known.
+    fit: bool,
 }
 
 impl Native {
@@ -101,6 +107,33 @@ impl Native {
             shot_sent: false,
             shot_done: Arc::default(),
             test_tray: u8::from(std::env::var_os("GANGLI_GUI_TEST_TRAY").is_some()),
+            fit: false,
+        }
+    }
+
+    /// First start: a size for this screen, centered. Then: tell the app the size and place to remember
+    /// (not while minimized, maximized or full screen: the next start opens it normal).
+    fn geometry(&mut self, ctx: &egui::Context) {
+        let (monitor, outer, inner, minimized, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.monitor_size, v.outer_rect, v.inner_rect, v.minimized, v.maximized, v.fullscreen)
+        });
+        if self.fit {
+            let (Some(m), Some(o), Some(inr)) = (monitor, outer, inner) else { return };
+            self.fit = false;
+            let (w, h) = super::default_size(m.x, m.y);
+            // The frame around the inner area (title bar, borders) stays as it is.
+            let (fw, fh) = (o.width() - inr.width(), o.height() - inr.height());
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            let pos = egui::pos2(((m.x - w - fw) / 2.0).max(0.0), ((m.y - h - fh) / 2.0).max(0.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            return;
+        }
+        if !self.visible || minimized == Some(true) || maximized == Some(true) || fullscreen == Some(true) {
+            return;
+        }
+        if let (Some(o), Some(inr)) = (outer, inner) {
+            self.app.window_geometry(super::Geometry { x: o.min.x, y: o.min.y, w: inr.width(), h: inr.height() });
         }
     }
 
@@ -189,6 +222,7 @@ impl eframe::App for Native {
             }
             ctx.request_repaint_after(Duration::from_millis(300));
         }
+        self.geometry(ctx);
         self.app.logic(self.visible);
         if self.app.take_show() {
             self.show(ctx);

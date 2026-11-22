@@ -11,6 +11,8 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub token: Option<String>,
+    /// The `X-Gangli` header was sent (a browser cannot send it to us without a preflight we never answer).
+    pub gangli: bool,
     pub body: Vec<u8>,
 }
 
@@ -23,6 +25,7 @@ pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(r: R) -> Result<Reque
     let (method, path) = (method.to_string(), path.to_string());
     let mut len = 0usize;
     let mut token = None;
+    let mut gangli = false;
     loop {
         let mut h = String::new();
         if br.read_line(&mut h).await? == 0 {
@@ -38,6 +41,8 @@ pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(r: R) -> Result<Reque
                 len = v.parse().map_err(|_| anyhow!("bad content-length"))?;
             } else if k == "authorization" {
                 token = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")).map(|t| t.trim().to_string());
+            } else if k == "x-gangli" {
+                gangli = true;
             }
         }
     }
@@ -46,7 +51,19 @@ pub async fn read_request<R: tokio::io::AsyncRead + Unpin>(r: R) -> Result<Reque
     }
     let mut body = vec![0u8; len];
     br.read_exact(&mut body).await?;
-    Ok(Request { method, path, token, body })
+    Ok(Request { method, path, token, gangli, body })
+}
+
+/// Blocking client side, no token: `POST path` with the `X-Gangli` header and no body.
+pub fn post_bare_blocking(stream: &mut std::net::TcpStream, path: &str) -> Result<serde_json::Value> {
+    use std::io::{Read, Write};
+    let req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Gangli: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes())?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw);
+    let (_, payload) = text.split_once("\r\n\r\n").ok_or_else(|| anyhow!("malformed answer"))?;
+    Ok(serde_json::from_str(payload)?)
 }
 
 pub async fn write_response<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, status: u16, body: &serde_json::Value) -> Result<()> {

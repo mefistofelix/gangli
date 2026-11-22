@@ -8,7 +8,9 @@
 //!
 //! The GUI is a console: it opens one in this process (owning the local port, the SSH gateway, the tunnels),
 //! or, when a console is already open in this folder (`gangli console run`), works through its local API.
-//! A second GUI started in the same folder only brings the first one's window up.
+//! A second gangli started on the same computer, from any folder, only brings the first one's window up.
+//! The window opens with its last size and place (`[gui]` in `gangli.console`), or about three quarters of
+//! the screen the first time.
 
 mod app;
 mod autostart;
@@ -75,9 +77,46 @@ pub fn started_from_desktop() -> bool {
     }
 }
 
+/// The window's size and place, in points (logical pixels).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Geometry {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// The size and place saved at the last run (`[gui] window` in `gangli.console`), if sensible.
+pub fn saved_geometry() -> Option<Geometry> {
+    let st: crate::console::ConsoleState = crate::store::load(&crate::paths::console_file()).ok()?;
+    let [x, y, w, h] = st.gui.window?;
+    (w >= MIN_SIZE.0 && h >= MIN_SIZE.1 && w < 20000.0 && h < 20000.0 && x.abs() < 50000.0 && y.abs() < 50000.0).then_some(Geometry { x, y, w, h })
+}
+
+/// The smallest window.
+pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
+
+/// A first size for a screen of `sw × sh` points (a 1920×1080 screen at 150% is 1280×720 points): about
+/// three quarters of it, not huge on a big screen, never more than fits.
+pub fn default_size(sw: f32, sh: f32) -> (f32, f32) {
+    let w = (sw * 0.75).clamp(800.0, 1280.0).min(sw * 0.94).max(MIN_SIZE.0);
+    let h = (sh * 0.78).clamp(560.0, 860.0).min(sh * 0.88).max(MIN_SIZE.1);
+    (w.round(), h.round())
+}
+
 /// `gangli gui` (and `gangli` from a desktop). `hidden`: start in the tray (at login).
 pub fn run(hidden: bool) -> Result<()> {
-    // Another GUI open in this folder: bring it up and leave.
+    // A gangli window already open on this computer (from any folder): bring it up and leave.
+    #[cfg(windows)]
+    unsafe {
+        // We were just started by the user, so we may hand the foreground to the window we wake.
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY);
+    }
+    if crate::ipc::show_running_gui() == Some(true) {
+        glog("another gangli window is open: brought it up");
+        return Ok(());
+    }
+    // An older gangli open in this folder.
     if let Ok(Some(v)) = crate::ipc::call_open(crate::ipc::IpcOp::GuiShow) {
         if v["shown"].as_bool() == Some(true) {
             return Ok(());
@@ -99,6 +138,19 @@ fn hide_own_console() {
         unsafe {
             windows_sys::Win32::System::Console::FreeConsole();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_sizes() {
+        // a 1920×1080 screen at 150%, a small laptop, a big screen
+        assert_eq!(super::default_size(1280.0, 720.0), (960.0, 562.0));
+        assert_eq!(super::default_size(1366.0, 768.0), (1025.0, 599.0));
+        assert_eq!(super::default_size(2560.0, 1440.0), (1280.0, 860.0));
+        let (w, h) = super::default_size(800.0, 600.0);
+        assert!(w <= 800.0 && h <= 600.0);
     }
 }
 

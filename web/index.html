@@ -45,6 +45,7 @@
   .msg.info { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   ol { padding-left: 20px; margin: 6px 0; }
   li { margin: 4px 0; }
+  .ok-title { color: var(--good); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -55,16 +56,16 @@
 </header>
 <main>
   <section class="card" id="pair" hidden>
-    <h2>Add this machine to a network</h2>
-    <p class="weak">Pick the network. The machine receives it in a few seconds and joins; a console of that network then admits it.</p>
+    <h2>Add the machine to a network</h2>
+    <p class="weak" id="pair-hint">Tap the network for the machine you scanned. It joins by itself in a few seconds; a console of that network then admits it.</p>
     <div id="pair-list"></div>
     <div id="pair-msg"></div>
   </section>
 
-  <section class="card" id="save" hidden>
-    <h2>Keep this network?</h2>
-    <p><span class="name" id="save-name"></span> <span class="weak" id="save-id"></span></p>
-    <div class="row"><button class="primary" id="save-yes">Keep it</button><button id="save-no">No</button></div>
+  <section class="card" id="saved" hidden>
+    <h2 class="ok-title">✓ <span id="saved-name"></span> is saved on this phone</h2>
+    <p class="weak" id="saved-next">Next, on the machine to add: gangli → This computer → <b>Pair with your phone</b>, then scan its QR with this phone's camera.</p>
+    <div class="row"><button class="link" id="saved-undo">Undo</button></div>
   </section>
 
   <section class="card">
@@ -83,8 +84,9 @@
   <section class="card">
     <h2>How it works</h2>
     <ol class="weak">
+      <li>Once: on your computer, gangli → Networks → <b>Codes</b>, scan the QR with the phone's camera. The network is saved here.</li>
       <li>On the machine to add: gangli → This computer → <b>Pair with your phone</b> (or <code>gangli pair</code>): a QR appears.</li>
-      <li>Scan it with the phone's camera: this page opens. Pick the network.</li>
+      <li>Scan it with the phone's camera: this page opens. Tap the network.</li>
       <li>The machine joins; a console of that network admits it.</li>
     </ol>
     <p class="weak">This page keeps <b>public codes only</b>, in this browser. A public code can only make a machine ask to join; it cannot reach or control anything. A private code is refused: it never belongs on a phone. The message to the machine is encrypted with a key only its screen showed, and goes through the public pkarr relays.</p>
@@ -211,20 +213,37 @@ function render() {
     row.append(info, del); box.append(row);
   }
 }
+// A machine scanned while this phone had no network yet: kept for 10 minutes (as long as the machine waits),
+// so that saving a network right after offers to send it, without scanning the machine again.
+const PENDING = "gangli.pending-pair.v1";
+function setPending(seed) { try { localStorage.setItem(PENDING, JSON.stringify({ seed, until: Date.now() + 10 * 60 * 1000 })); } catch {} }
+function getPending() {
+  try { const p = JSON.parse(localStorage.getItem(PENDING) || "null"); if (p && p.until > Date.now()) return p.seed; localStorage.removeItem(PENDING); } catch {}
+  return null;
+}
+function clearPending() { try { localStorage.removeItem(PENDING); } catch {} }
+
 function showPair(seed) {
   $("pair").hidden = false;
   const box = $("pair-list"); box.innerHTML = "";
   const list = load();
-  if (!list.length) { say("pair-msg", "info", "No network on this phone yet: on your computer open gangli → Networks → Codes, scan that QR, then scan the machine's QR again."); return; }
+  if (!list.length) {
+    setPending(seed);
+    $("pair-hint").hidden = true;
+    say("pair-msg", "info", "This phone has no network yet. On your computer, open gangli → Networks → Codes and scan that QR with this phone: the network is saved, and you can send it to this machine right away (no need to scan the machine again).");
+    return;
+  }
+  $("pair-hint").hidden = false;
   say("pair-msg", "", "");
   for (const n of list) {
-    const b = document.createElement("button"); b.className = "big"; b.textContent = n.name;
+    const b = document.createElement("button"); b.className = "big primary"; b.textContent = n.name;
     b.onclick = async () => {
       for (const x of box.querySelectorAll("button")) x.disabled = true;
       say("pair-msg", "info", `Sending ${n.name} to the machine…`);
       try {
         await sendToMachine(seed, n.code);
-        say("pair-msg", "ok", `Sent. The machine joins ${n.name} in a few seconds; a console of ${n.name} then admits it.`);
+        clearPending();
+        say("pair-msg", "ok", `Done: sent. The machine joins ${n.name} in a few seconds; a console of ${n.name} then admits it.`);
       } catch (e) {
         say("pair-msg", "err", e.message);
         for (const x of box.querySelectorAll("button")) x.disabled = false;
@@ -233,18 +252,22 @@ function showPair(seed) {
     box.append(b);
   }
 }
-function showSave(code, name) {
+// A network QR scanned: saved at once (a public code, harmless), with a way back.
+function saveFromLink(code, name) {
   const p = parseCode(code);
   if (p.private) { say("msg", "err", PRIVATE_REFUSED); return; }
   if (p.error) { say("msg", "err", p.error); return; }
-  $("save").hidden = false;
-  $("save-name").textContent = name || "network";
-  $("save-id").textContent = p.id;
-  $("save-yes").onclick = () => {
-    try { const n = keep(p.code, name); $("save").hidden = true; render(); say("msg", "ok", `${n.name} kept on this phone.`); }
-    catch (e) { say("msg", "err", e.message); }
-  };
-  $("save-no").onclick = () => { $("save").hidden = true; };
+  const had = load().some((n) => n.code === p.code);
+  let n;
+  try { n = keep(p.code, name); } catch (e) { say("msg", "err", e.message); return; }
+  render();
+  $("saved").hidden = false;
+  $("saved-name").textContent = n.name;
+  $("saved-undo").hidden = had;
+  $("saved-undo").onclick = () => { store(load().filter((x) => x.code !== n.code)); render(); $("saved").hidden = true; $("pair").hidden = true; say("msg", "info", `${n.name} removed from this phone.`); };
+  const pending = getPending();
+  $("saved-next").hidden = !!pending;
+  if (pending) showPair(pending);
 }
 async function selftest() {
   // the vectors of src/pair.rs (seed = 32 bytes of 0x01)
@@ -258,18 +281,27 @@ async function selftest() {
 }
 function route() {
   const h = new URLSearchParams(location.hash.slice(1));
-  if (location.hash.length < 2) return;
+  if (location.hash.length < 2) {
+    // opened by hand while a scanned machine still waits for a network
+    const pending = getPending();
+    if (pending && load().length) showPair(pending);
+    return;
+  }
   // a new QR scanned in the same tab: start from a clean screen
-  $("save").hidden = true; $("pair").hidden = true; say("msg", "", ""); say("pair-msg", "", ""); render();
-  if (h.has("net")) showSave(h.get("net"), h.get("name"));
+  $("saved").hidden = true; $("pair").hidden = true; say("msg", "", ""); say("pair-msg", "", ""); render();
+  if (h.has("net")) saveFromLink(h.get("net"), h.get("name"));
   else if (h.has("pair")) showPair(h.get("pair"));
   else if (h.has("selftest")) selftest();
   // the fragment carries a one-use key: do not leave it in the address bar or the history
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 }
 $("add").onclick = () => {
-  try { const n = keep($("code").value, $("name").value); $("code").value = ""; $("name").value = ""; render(); say("msg", "ok", `${n.name} kept on this phone.`); }
-  catch (e) { say("msg", "err", e.message); }
+  try {
+    const n = keep($("code").value, $("name").value); $("code").value = ""; $("name").value = ""; render();
+    say("msg", "ok", `${n.name} saved on this phone.`);
+    const pending = getPending();
+    if (pending) showPair(pending);
+  } catch (e) { say("msg", "err", e.message); }
 };
 window.addEventListener("hashchange", route);
 render();

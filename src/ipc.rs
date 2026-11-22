@@ -53,6 +53,8 @@ pub enum IpcOp {
     DebugDrop { node: String },
     /// Bring the GUI window of this console up (a second `gangli` was started in the folder).
     GuiShow,
+    /// The GUI window's size and place (points), kept in `gangli.console` for the next start.
+    GuiWindow { x: f32, y: f32, w: f32, h: f32 },
     Stop,
 }
 
@@ -73,7 +75,7 @@ impl IpcOp {
             // An admin token can do what the CLI and the GUI do (an AI agent managing the machines), except
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::Stop => Some("admin"),
-            IpcOp::DebugDrop { .. } | IpcOp::GuiShow => None,
+            IpcOp::DebugDrop { .. } | IpcOp::GuiShow | IpcOp::GuiWindow { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } => None,
         }
     }
@@ -130,6 +132,33 @@ pub fn call(op: IpcOp) -> Result<Value> {
         Some((s, pf)) => ask(s, pf, op),
         None => crate::console::run_once(op),
     }
+}
+
+/// A gangli window already open on this computer, from any folder: asks it to come up. Tries this folder's
+/// console port, then the default one. `Some(true)`: it is up now; `Some(false)`: a console without a window
+/// answered there; `None`: nobody (or an older gangli that does not know the request).
+pub fn show_running_gui() -> Option<bool> {
+    let mut ports = vec![];
+    if let Ok(st) = crate::store::load::<crate::console::ConsoleState>(&crate::paths::console_file()) {
+        ports.push(st.console.port);
+    }
+    ports.push(crate::console::ConsoleConf::default().port);
+    ports.dedup();
+    let mut answer = None;
+    for port in ports {
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { continue };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        if let Ok(v) = crate::http::post_bare_blocking(&mut s, "/gui/show") {
+            if v["shown"].as_bool() == Some(true) {
+                return Some(true);
+            }
+            if v["ok"].as_bool() == Some(true) {
+                answer = Some(false);
+            }
+        }
+    }
+    answer
 }
 
 /// Only on an open console (`console stop`).

@@ -122,6 +122,9 @@ pub struct App {
     /// Integrated terminals (only when the console lives in this window).
     tabs: Vec<super::term::TermTab>,
     tab_active: usize,
+    /// The window's size and place: as last seen (and since when), as last saved.
+    geo_seen: Option<(super::Geometry, Instant)>,
+    geo_saved: Option<super::Geometry>,
 }
 
 fn target(n: &NodeView) -> String {
@@ -235,6 +238,8 @@ impl App {
             copy: None,
             tabs: vec![],
             tab_active: 0,
+            geo_seen: None,
+            geo_saved: super::saved_geometry(),
         };
         app.read_node();
         // A binary made for a relative (with an embedded code), or a computer with no network yet: start on
@@ -346,6 +351,7 @@ impl App {
             self.inflight.remove(&r.tag);
             self.on_reply(r.tag, r.result);
         }
+        self.save_geometry();
         let every = if visible { REFRESH } else { REFRESH_HIDDEN };
         if self.polled.is_none_or(|t| t.elapsed() >= every) {
             self.polled = Some(Instant::now());
@@ -383,7 +389,9 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 // Periodic refreshes fail quietly (the next one will say it again); actions say why.
-                if !matches!(tag, Tag::Nodes | Tag::Status | Tag::Tunnels | Tag::Ssh | Tag::Api | Tag::Terms(_)) {
+                if tag == Tag::Quiet {
+                    super::glog(&e);
+                } else if !matches!(tag, Tag::Nodes | Tag::Status | Tag::Tunnels | Tag::Ssh | Tag::Api | Tag::Terms(_)) {
                     self.toast(e, true);
                 }
                 return;
@@ -456,6 +464,23 @@ impl App {
                 self.call(Tag::Api, IpcOp::ApiStatus);
             }
             Tag::Show => self.show = true,
+            Tag::Quiet => {}
+        }
+    }
+
+    /// The window's size and place as the platform layer sees them now (points); saved in `gangli.console`
+    /// once they have been still for a second, so the next start opens it the same.
+    pub fn window_geometry(&mut self, g: super::Geometry) {
+        if self.geo_seen.map(|(s, _)| s) != Some(g) {
+            self.geo_seen = Some((g, Instant::now()));
+        }
+    }
+
+    fn save_geometry(&mut self) {
+        let Some((g, at)) = self.geo_seen else { return };
+        if at.elapsed() >= Duration::from_secs(1) && self.geo_saved != Some(g) {
+            self.geo_saved = Some(g);
+            self.call(Tag::Quiet, IpcOp::GuiWindow { x: g.x, y: g.y, w: g.w, h: g.h });
         }
     }
 

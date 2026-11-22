@@ -458,6 +458,17 @@ Names: the admitting console names nodes (slug of the hostname, unique per netwo
   (`gui/autostart.rs`): a login item of the user (Windows `Run` key, XDG autostart entry, LaunchAgent
   without KeepAlive) that runs `gangli gui --hidden`, which stays in the tray (or shows the window after
   3 s when there is no tray). Never a service.
+- **One window per computer [decided 2026-11-22]**: a gangli started while another one's window is open (from
+  any folder) brings that window up and closes. It asks with `POST /gui/show` on its folder's console port
+  and on the default one (7373): no token, since it can only raise the window (or learn there is none), and
+  only with an `X-Gangli` header, which a web page cannot send to localhost without a CORS preflight this
+  server never answers. On Windows it first allows the other process to take the foreground, so the window
+  really comes up instead of blinking in the taskbar.
+- **Window size [decided 2026-11-22]**: the last size and place, saved in `gangli.console` (`[gui] window =
+  [x, y, w, h]` in points, once the window has been still for a second; not while minimized, maximized or
+  full screen). The first time: about three quarters of the screen in points (800–1280 × 560–860, never more
+  than fits), centered; a 1920×1080 screen at 150% is 1280×720 points, where a fixed 1080×700 was nearly the
+  whole screen. On X11 the place uses StaticGravity, so it does not drift by the title bar at each start.
 - **Local API** **[decided]**: off by default, enabled from the GUI or `gangli api enable` (on the console's local port,
   127.0.0.1:7373 by default, `[console] port`), served while a console is open. Named tokens made and revoked from the GUI or `gangli api token add|remove`,
   never through the API itself; scopes `read` (status, machines, details) < `exec` (also commands, jobs,

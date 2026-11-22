@@ -64,6 +64,15 @@ pub struct ConsoleState {
     pub tunnels: Vec<Tunnel>,
     #[serde(default, rename = "network")]
     pub networks: Vec<ConsoleNet>,
+    #[serde(default)]
+    pub gui: GuiConf,
+}
+
+/// The window's last size and place, `[x, y, width, height]` in points (logical pixels).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct GuiConf {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<[f32; 4]>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1044,6 +1053,17 @@ async fn http_conn(c: Arc<Console>, sock: tokio::net::TcpStream) {
         let _ = crate::http::write_response(&mut w, 400, &json!({ "ok": false, "error": "bad request" })).await;
         return;
     };
+    // Another gangli started on this computer, from any folder: it asks the window already open to come up and
+    // closes. No token: this can only raise the window (or say there is none); `X-Gangli` keeps web pages out.
+    if req.method == "POST" && req.path == "/gui/show" && req.gangli {
+        let gui = c.gui.load(Ordering::SeqCst);
+        if gui {
+            c.gui_show.notify_one();
+        }
+        let folder = crate::paths::base_dir().display().to_string();
+        let _ = crate::http::write_response(&mut w, 200, &json!({ "ok": true, "shown": gui, "folder": folder })).await;
+        return;
+    }
     let Some(who) = caller(&c, req.token.as_deref()) else {
         let _ = crate::http::write_response(&mut w, 401, &json!({ "ok": false, "error": "missing or unknown token" })).await;
         return;
@@ -1707,6 +1727,14 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                 c.gui_show.notify_one();
             }
             Ok(json!({ "shown": gui }))
+        }
+        IpcOp::GuiWindow { x, y, w, h } => {
+            if !(w.is_finite() && h.is_finite() && x.is_finite() && y.is_finite()) || w < 200.0 || h < 150.0 {
+                bail!("bad window size");
+            }
+            c.state.lock().unwrap().gui.window = Some([x.round(), y.round(), w.round(), h.round()]);
+            c.save();
+            Ok(json!({ "saved": true }))
         }
         IpcOp::Stop => {
             c.stop.notify_one();

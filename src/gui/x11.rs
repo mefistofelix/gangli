@@ -314,7 +314,14 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
         net_wm_pid: atom(&c, "_NET_WM_PID")?,
     };
     let scale = dpi_scale(&c, screen.root);
-    let init = ((1080.0 * scale) as u16, (700.0 * scale) as u16);
+    // The last size and place, else about three quarters of the screen, centered.
+    let (sw, sh) = (screen.width_in_pixels as f32 / scale, screen.height_in_pixels as f32 / scale);
+    let g = super::saved_geometry().unwrap_or_else(|| {
+        let (w, h) = super::default_size(sw, sh);
+        super::Geometry { x: ((sw - w) / 2.0).max(0.0), y: ((sh - h) / 2.0).max(0.0), w, h }
+    });
+    let init = ((g.w * scale) as u16, (g.h * scale) as u16);
+    let pos = ((g.x * scale) as i16, (g.y * scale) as i16);
     let win = c.generate_id()?;
     let mask = EventMask::EXPOSURE
         | EventMask::STRUCTURE_NOTIFY
@@ -325,7 +332,7 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
         | EventMask::POINTER_MOTION
         | EventMask::FOCUS_CHANGE
         | EventMask::LEAVE_WINDOW;
-    c.create_window(depth, win, screen.root, 0, 0, init.0, init.1, 0, WindowClass::INPUT_OUTPUT, screen.root_visual, &CreateWindowAux::new().background_pixel(0x202020).event_mask(mask))?;
+    c.create_window(depth, win, screen.root, pos.0, pos.1, init.0, init.1, 0, WindowClass::INPUT_OUTPUT, screen.root_visual, &CreateWindowAux::new().background_pixel(0x202020).event_mask(mask))?;
     c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"gangli")?;
     c.change_property8(PropMode::REPLACE, win, a.net_wm_name, a.utf8, b"gangli")?;
     c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"gangli\0gangli\0")?;
@@ -339,11 +346,18 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
         }
     }
     c.change_property32(PropMode::REPLACE, win, a.net_wm_icon, AtomEnum::CARDINAL, &icon)?;
-    // Minimum size (WM_NORMAL_HINTS: flags PMinSize, then min width / height at fields 5 and 6).
+    // WM_NORMAL_HINTS: our place and size (USPosition | USSize, fields 1-4), the minimum size (PMinSize, fields
+    // 5-6), and StaticGravity (PWinGravity, field 17): the place is the window's own, not its frame's, so a
+    // saved place comes back exactly instead of moving down by the title bar at every start.
     let mut hints = [0u32; 18];
-    hints[0] = 16;
-    hints[5] = (640.0 * scale) as u32;
-    hints[6] = (420.0 * scale) as u32;
+    hints[0] = 1 | 2 | 16 | 512;
+    hints[1] = pos.0 as i32 as u32;
+    hints[2] = pos.1 as i32 as u32;
+    hints[3] = init.0 as u32;
+    hints[4] = init.1 as u32;
+    hints[5] = (super::MIN_SIZE.0 * scale) as u32;
+    hints[6] = (super::MIN_SIZE.1 * scale) as u32;
+    hints[17] = 10;
     c.change_property32(PropMode::REPLACE, win, AtomEnum::WM_NORMAL_HINTS, AtomEnum::WM_SIZE_HINTS, &hints)?;
     let gc = c.generate_id()?;
     c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
@@ -405,6 +419,7 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
     let start = Instant::now();
     let shot = super::png::screenshot_request();
     let mut test_tray = u8::from(std::env::var_os("GANGLI_GUI_TEST_TRAY").is_some());
+    let mut moved: Option<Instant> = None;
 
     'outer: loop {
         let wait = next_frame.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(2)).min(Duration::from_secs(2));
@@ -433,6 +448,8 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
                     match e {
                         XEvent::Expose(_) => dirty_put = true,
                         XEvent::ConfigureNotify(e) if e.window == win => {
+                            // moved or resized: its place is read (and remembered) once it stays still
+                            moved = Some(Instant::now());
                             if (e.width, e.height) != (width, height) {
                                 width = e.width;
                                 height = e.height;
@@ -593,6 +610,21 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
                 map_unless_tray = None;
                 w.show();
             }
+        }
+        if moved.is_some_and(|t| t.elapsed() >= Duration::from_millis(600)) && w.mapped {
+            moved = None;
+            // The window's place on the screen (a window manager's frame makes ConfigureNotify's relative).
+            if let Ok(Ok(r)) = c.translate_coordinates(win, screen.root, 0, 0).map(|ck| ck.reply()) {
+                app.window_geometry(super::Geometry {
+                    x: r.dst_x as f32 / scale,
+                    y: r.dst_y as f32 / scale,
+                    w: width as f32 / scale,
+                    h: height as f32 / scale,
+                });
+            }
+        }
+        if moved.is_some() {
+            next_frame = Some(next_frame.map_or(Instant::now() + Duration::from_millis(700), |t| t.min(Instant::now() + Duration::from_millis(700))));
         }
         app.logic(w.mapped);
         if app.take_show() {
