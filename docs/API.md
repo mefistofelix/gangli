@@ -43,16 +43,20 @@ Every request carries `Authorization: Bearer <token>`. Answers are `{"ok": true,
   `network_relays` without `set` shows a network's extra relays (read scope); with `set` it replaces them
   (`[]`: the n0 relays only) and sends them to the network's machines (admin scope).
 
-  Updates (admin): `{"op": "update", "nodes": ["nas"], "from": "<release folder>"}` sends each machine its
-  binary; `{"op": "self_update", "from": "<new binary or release folder>"}` updates this computer's gangli.
+  Updates (admin): `{"op": "update", "nodes": ["nas"]}` updates machines to the latest release (each one
+  downloads its binary from GitHub, checked against the release's SHA256SUMS; `"from"`: `build-N`, an https
+  folder, or a local release folder whose binaries are sent); `{"op": "self_update"}` (same `from`, or a
+  binary) updates this computer's gangli.
   Either way the new binary is tried first, the running gangli restarts on it, and the previous one comes
   back by itself if the new one does not keep running (section 11 of ARCHITECTURE.md). The console's API
   stops for a few seconds while it restarts.
 
   Power: `{"op": "power", "node": "nas"}` (read scope) shows whether it is plugged in (`on_ac`), the
-  `battery` charge and its timeouts in minutes (0: never; `_ac` plugged in, `_dc` on battery: `sleep_`,
-  `hibernate_`, `display_`); with `"set": {"sleep_ac": 0, "hibernate_ac": 0}` (admin) it changes them
-  first (Linux: `{"sleep_blocked": true}`). A sleeping machine is offline until someone wakes it.
+  `battery` charge, its own timeouts in minutes (0: never; `_ac` plugged in, `_dc` on battery: `sleep_`,
+  `hibernate_`, `display_`; read only), `keep_awake` and `awake` (held now). `"keep_awake": "plugged"`
+  (or `always`, `off`; admin) makes its gangli hold a temporary request to the OS not to sleep while idle:
+  its settings are never changed, the screen still turns off. A sleeping machine is offline until someone
+  wakes it.
 
   Network (admin): `{"op": "net_probe"}` looks for a UDP port the router forwards to this computer (a machine
   outside sends the probes; up to a minute) and answers `found` (the port, or null) and `net`; a port found

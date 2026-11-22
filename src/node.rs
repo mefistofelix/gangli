@@ -233,6 +233,9 @@ async fn run(stop: Arc<AtomicBool>) -> Result<()> {
         *HOME_RELAY.lock().unwrap() = crate::util::home_relay(router.endpoint());
         *NET.lock().unwrap() = Some(crate::util::net_info(router.endpoint()));
 
+        // Keep awake as the owner set it (mains or battery from the last local check).
+        crate::power::hold(st.node.keep_awake.wanted(inv.on_ac)).await;
+
         // Networks left (`gangli leave`, the GUI): their consoles are told and their sessions closed.
         let ids: Vec<String> = st.networks.iter().map(|m| m.id.clone()).collect();
         sessions.leave_gone(&ids);
@@ -672,20 +675,48 @@ async fn serve(conn: Connection, sessions: Arc<Sessions>) {
                     let _ = send.finish();
                 });
             }
-            Req::Power { set } if authed => {
+            Req::Power { keep_awake } if authed => {
                 tokio::spawn(async move {
-                    let r = tokio::task::spawn_blocking(move || match set {
-                        Some(s) => crate::power::set(&s),
-                        None => Ok(crate::power::read()),
-                    })
+                    let r: Result<crate::power::Power> = async {
+                        let mode = match keep_awake {
+                            Some(m) => {
+                                state::update(|st| {
+                                    st.node.keep_awake = m;
+                                    Ok(())
+                                })?;
+                                log_line(&format!("keep awake: {} (set by a console)", m.label()));
+                                // Now rather than at the next turn of the loop, so the answer shows it.
+                                crate::power::hold(m.wanted(crate::power::source().0)).await;
+                                m
+                            }
+                            None => state::load().map(|st| st.node.keep_awake).unwrap_or_default(),
+                        };
+                        let mut p = tokio::task::spawn_blocking(crate::power::read).await.map_err(|e| anyhow!("{e}"))?;
+                        p.keep_awake = mode;
+                        Ok(p)
+                    }
                     .await;
                     let resp = match r {
-                        Ok(Ok(power)) => Resp::Power { power },
-                        Ok(Err(e)) => Resp::Error { message: format!("{e:#}") },
-                        Err(e) => Resp::Error { message: e.to_string() },
+                        Ok(power) => Resp::Power { power },
+                        Err(e) => Resp::Error { message: format!("{e:#}") },
                     };
                     let _ = proto::write_frame(&mut send, &resp).await;
                     let _ = send.finish();
+                });
+            }
+            Req::UpdateUrl { url, sha256 } if authed => {
+                tokio::spawn(async move {
+                    log_line(&format!("update from {url}"));
+                    let r: Result<Vec<u8>> = async {
+                        let http = crate::update::http_client()?;
+                        crate::update::download(&http, &url, &sha256).await
+                    }
+                    .await;
+                    let r = match r {
+                        Ok(bytes) => apply_update(bytes).await,
+                        Err(e) => Err(e),
+                    };
+                    answer_update(send, r).await;
                 });
             }
             Req::Update { size } if authed => {
@@ -1086,7 +1117,6 @@ where
     R: AsyncRead + Unpin + Send + 'static,
 {
     use tokio::io::AsyncReadExt;
-    // Staged next to the binary, tried, swapped (update.rs): the answer says whether it will restart on it.
     let r: Result<bool> = async {
         if size == 0 || size > 200 << 20 {
             bail!("bad size");
@@ -1094,14 +1124,24 @@ where
         let mut bytes = vec![0u8; size as usize];
         recv.read_exact(&mut bytes).await.ctx("receive the binary")?;
         log_line("update received");
-        tokio::task::spawn_blocking(move || {
-            crate::update::stage(&bytes)?;
-            crate::update::apply_staged()
-        })
-        .await
-        .map_err(|e| anyhow!("{e}"))?
+        apply_update(bytes).await
     }
     .await;
+    answer_update(send, r).await;
+}
+
+/// Staged next to the binary, tried, swapped (update.rs): whether it will restart on it.
+async fn apply_update(bytes: Vec<u8>) -> Result<bool> {
+    tokio::task::spawn_blocking(move || {
+        crate::update::stage(&bytes)?;
+        crate::update::apply_staged()
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))?
+}
+
+/// Tell the console, then restart on the new binary if it was put in place.
+async fn answer_update<W: AsyncWrite + Unpin>(mut send: W, r: Result<bool>) {
     match r {
         Ok(swapped) => {
             let _ = proto::write_frame(&mut send, &Resp::Updating).await;

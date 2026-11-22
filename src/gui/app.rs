@@ -63,22 +63,8 @@ enum Modal {
     /// A gateway login rule, new (`index: None`) or rule `index`; keys one per line; an empty password keeps
     /// the old one (a new rule gets a generated one).
     Rule { index: Option<usize>, hosts: String, users: String, password: String, keys: String },
-    /// A machine's sleep and hibernation: as read (`was`) and as edited.
-    Power { node: String, name: String, was: crate::power::Power, edit: crate::power::Power },
-}
-
-/// A sleep / hibernate timeout to pick (minutes, 0 = never); nothing when the machine has no such setting.
-fn minutes_combo(ui: &mut Ui, id: &str, v: &mut Option<u32>) {
-    let Some(cur) = v.as_mut() else {
-        ui.label("");
-        return;
-    };
-    const CHOICES: [u32; 15] = [0, 1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300];
-    egui::ComboBox::from_id_salt(id).selected_text(crate::power::minutes_label(Some(*cur))).width(90.0).show_ui(ui, |ui| {
-        for c in CHOICES.iter().copied().chain((!CHOICES.contains(cur)).then_some(*cur)) {
-            ui.selectable_value(cur, c, crate::power::minutes_label(Some(c)));
-        }
-    });
+    /// A machine's power as read (`was`), and keep awake as chosen.
+    Power { node: String, name: String, was: crate::power::Power, mode: crate::power::KeepAwake },
 }
 
 /// A page's title with its main action (a "New …" button) at the top right; `true` when the action was clicked.
@@ -538,9 +524,10 @@ impl App {
             Tag::Power(node, name) => match serde_json::from_value::<crate::power::Power>(v["power"].clone()) {
                 Ok(p) => {
                     if matches!(&self.modal, Some(Modal::Power { node: n, .. }) if *n == node) {
-                        self.toast(format!("Power settings of {name} saved"), false);
+                        self.toast(format!("Keep awake on {name}: {}", p.keep_awake.label()), false);
                     }
-                    self.modal = Some(Modal::Power { node, name, was: p.clone(), edit: p });
+                    let mode = p.keep_awake;
+                    self.modal = Some(Modal::Power { node, name, was: p, mode });
                 }
                 Err(e) => self.toast(format!("{e}"), true),
             },
@@ -966,19 +953,24 @@ impl App {
 
         ui.add_space(4.0);
         if ui
-            .add_enabled(n.online, egui::Button::new("Sleep settings…"))
-            .on_hover_text("When it goes to sleep or hibernates, plugged in and on battery: a machine asleep is offline until someone wakes it")
+            .add_enabled(n.online, egui::Button::new("Power…"))
+            .on_hover_text("Its sleep settings, and keep it awake: a machine asleep is offline until someone wakes it")
             .clicked()
         {
-            self.call(Tag::Power(tgt.clone(), n.name.clone()), IpcOp::Power { node: tgt.clone(), set: None });
+            self.call(Tag::Power(tgt.clone(), n.name.clone()), IpcOp::Power { node: tgt.clone(), keep_awake: None });
         }
 
         // Update, forget.
         ui.add_space(8.0);
         ui.label(RichText::new("Update").strong());
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.f.update_from).hint_text("folder with a signed release").desired_width(220.0));
-            if ui.add_enabled(n.online && !self.f.update_from.trim().is_empty(), egui::Button::new("Update")).clicked() {
+            ui.add(egui::TextEdit::singleline(&mut self.f.update_from).hint_text("latest (or build-N, a folder)").desired_width(220.0));
+            if ui
+                .add_enabled(n.online, egui::Button::new("Update"))
+                .on_hover_text("From a release on the Internet the machine downloads it itself (checked against the release's SHA256SUMS); from a folder this console sends it")
+                .clicked()
+            {
+                self.toast(format!("Updating {}…", n.name), false);
                 self.call(Tag::Done(String::new()), IpcOp::Update { nodes: vec![tgt.clone()], from: self.f.update_from.trim().to_string() });
             }
         });
@@ -1919,51 +1911,55 @@ impl App {
                 }
                 Modal::SelfUpdate { from } => {
                     ui.heading("Update gangli");
-                    ui.label(format!("Now {}. The new binary, or a folder with the release binaries (`gh release download build-N`):", crate::version_line()));
-                    ui.add(egui::TextEdit::singleline(from).hint_text(if cfg!(windows) { r"C:\Users\me\Downloads\gangli-windows-x86_64.exe" } else { "/home/me/Downloads/gangli-linux-x86_64" }).desired_width(f32::INFINITY));
+                    ui.label(format!("Now {}. Empty: the latest release, downloaded from GitHub. Or build-N, a new binary, a folder with the release binaries:", crate::version_line()));
+                    ui.add(egui::TextEdit::singleline(from).hint_text("latest").desired_width(f32::INFINITY));
                     ui.label(RichText::new(
                         "It is tried first; then it takes this one's place and gangli restarts on it (the service running from this folder too). \
                          The previous version is kept, and comes back by itself if the new one does not keep running. Dropping the new binary \
                          next to this one, named like it plus .update, does the same.",
                     ).weak());
                 }
-                Modal::Power { name, edit, .. } => {
-                    ui.heading(format!("Sleep settings of {name}"));
-                    let inv = crate::inventory::Inventory { on_ac: edit.on_ac, battery: edit.battery, ..Default::default() };
+                Modal::Power { name, was, mode, .. } => {
+                    use crate::power::{minutes_label as m, KeepAwake};
+                    ui.heading(format!("Power of {name}"));
+                    let inv = crate::inventory::Inventory { on_ac: was.on_ac, battery: was.battery, awake: was.awake, ..Default::default() };
                     let now = inv.power_label();
                     if !now.is_empty() {
                         ui.label(format!("Now {now}."));
                     }
-                    ui.label(RichText::new("A machine asleep or hibernated is offline until someone wakes it. The screen still turns off as set on the machine.").weak());
-                    ui.add_space(6.0);
-                    let battery = edit.battery.is_some() || edit.sleep_dc.is_some();
-                    egui::Grid::new("power").num_columns(3).spacing([16.0, 6.0]).show(ui, |ui| {
-                        ui.label("");
-                        ui.label(RichText::new("Plugged in").strong());
-                        ui.label(RichText::new(if battery { "On battery" } else { "" }).strong());
-                        ui.end_row();
-                        for (what, ac, dc) in [("Sleep", &mut edit.sleep_ac, &mut edit.sleep_dc), ("Hibernate", &mut edit.hibernate_ac, &mut edit.hibernate_dc)] {
-                            if ac.is_none() && dc.is_none() {
-                                continue;
+                    let battery = was.battery.is_some() || was.sleep_dc.is_some();
+                    if [was.sleep_ac, was.hibernate_ac, was.display_ac].iter().any(Option::is_some) {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Its settings (left as they are)").strong());
+                        egui::Grid::new("power").num_columns(3).spacing([16.0, 4.0]).show(ui, |ui| {
+                            ui.label("");
+                            ui.label(RichText::new("Plugged in").weak());
+                            ui.label(RichText::new(if battery { "On battery" } else { "" }).weak());
+                            ui.end_row();
+                            for (what, ac, dc) in [("Sleep", was.sleep_ac, was.sleep_dc), ("Hibernate", was.hibernate_ac, was.hibernate_dc), ("Screen off", was.display_ac, was.display_dc)] {
+                                if ac.is_some() || dc.is_some() {
+                                    ui.label(what);
+                                    ui.label(m(ac));
+                                    ui.label(if battery { m(dc) } else { String::new() });
+                                    ui.end_row();
+                                }
                             }
-                            ui.label(what);
-                            minutes_combo(ui, &format!("{what}-ac"), ac);
-                            minutes_combo(ui, &format!("{what}-dc"), dc);
-                            ui.end_row();
-                        }
-                        if edit.display_ac.is_some() || edit.display_dc.is_some() {
-                            ui.label(RichText::new("Screen off").weak());
-                            ui.label(RichText::new(crate::power::minutes_label(edit.display_ac)).weak());
-                            ui.label(RichText::new(if battery { crate::power::minutes_label(edit.display_dc) } else { String::new() }).weak());
-                            ui.end_row();
-                        }
+                        });
+                    }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Keep awake").strong());
+                    ui.label(
+                        RichText::new(
+                            "gangli asks the system not to sleep while idle, for as long as this is on: a temporary request, its settings stay as they are \
+                             and come back by themselves when you turn it off. The screen still turns off.",
+                        )
+                        .weak(),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.radio_value(mode, KeepAwake::Off, "Off");
+                        ui.radio_value(mode, KeepAwake::Plugged, "When plugged in");
+                        ui.radio_value(mode, KeepAwake::Always, "Always");
                     });
-                    if let Some(b) = edit.sleep_blocked.as_mut() {
-                        ui.checkbox(b, "Never sleep or hibernate (the whole system)");
-                    }
-                    if !edit.note.is_empty() {
-                        ui.label(RichText::new(edit.note.as_str()).weak());
-                    }
                 }
                 Modal::MakeExe { picks } => {
                     ui.heading("Create a gangli executable");
@@ -2099,25 +2095,18 @@ impl App {
                         keep = false;
                     }
                 } else if let Modal::SelfUpdate { from } = &m {
-                    if ui.add_enabled(!from.trim().is_empty(), egui::Button::new(RichText::new("Update").strong())).clicked() {
+                    if ui.button(RichText::new("Update").strong()).clicked() {
                         let from = from.trim().trim_matches('"').to_string();
+                        self.toast("Downloading and trying the new gangli…", false);
                         self.call(Tag::Done("Updated: gangli restarts on the new version".into()), IpcOp::SelfUpdate { from });
                         keep = false;
                     }
                     if ui.button("Cancel").clicked() {
                         keep = false;
                     }
-                } else if let Modal::Power { node, name, was, edit } = &m {
-                    let pick = |a: Option<u32>, b: Option<u32>| (a != b).then_some(b).flatten();
-                    let set = crate::power::PowerSet {
-                        sleep_ac: pick(was.sleep_ac, edit.sleep_ac),
-                        sleep_dc: pick(was.sleep_dc, edit.sleep_dc),
-                        hibernate_ac: pick(was.hibernate_ac, edit.hibernate_ac),
-                        hibernate_dc: pick(was.hibernate_dc, edit.hibernate_dc),
-                        sleep_blocked: (was.sleep_blocked != edit.sleep_blocked).then_some(edit.sleep_blocked).flatten(),
-                    };
-                    if ui.add_enabled(!set.is_empty(), egui::Button::new(RichText::new("Save").strong())).clicked() {
-                        self.call(Tag::Power(node.clone(), name.clone()), IpcOp::Power { node: node.clone(), set: Some(set) });
+                } else if let Modal::Power { node, name, was, mode } = &m {
+                    if ui.add_enabled(*mode != was.keep_awake, egui::Button::new(RichText::new("Save").strong())).clicked() {
+                        self.call(Tag::Power(node.clone(), name.clone()), IpcOp::Power { node: node.clone(), keep_awake: Some(*mode) });
                     }
                     if ui.button("Close").clicked() {
                         keep = false;

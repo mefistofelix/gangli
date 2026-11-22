@@ -17,8 +17,11 @@
 //!    binary replaced by another gangli of the same folder (the window updating while the service runs from
 //!    the same file), and restarts on the new one.
 //!
-//! A console can update its machines (`update`); only consoles of the network (owners) can send one, and
-//! they can already run anything on the machine: no signature on top.
+//! A console can update its machines (`update`); only consoles of the network (owners) can do it, and they
+//! can already run anything on the machine: no signature on top. From a release on the Internet (`latest`,
+//! `build-N`, an https folder) the console only sends the address and the SHA-256 from the release's
+//! `SHA256SUMS`: the machine downloads the binary itself (fast, not through a relay) and checks it. From a
+//! local folder the console sends the bytes.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -97,6 +100,72 @@ pub fn stage_from(from: &Path) -> Result<()> {
     };
     let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
     stage(&bytes)
+}
+
+/// gangli's releases (GitHub Actions of the public repository; README).
+pub const RELEASES: &str = "https://github.com/mefistofelix/gangli/releases";
+
+/// Where a release is on the Internet, from what the owner wrote: `latest` (or nothing), `build-N`, or the
+/// https address of a folder with the release files (`SHA256SUMS` and the binaries). `None`: a local path.
+pub fn release_url(from: &str) -> Option<String> {
+    let f = from.trim().trim_end_matches('/');
+    if f.is_empty() || f == "latest" {
+        Some(format!("{RELEASES}/latest/download"))
+    } else if f.starts_with("build-") && !f.contains(['/', '\\']) {
+        Some(format!("{RELEASES}/download/{f}"))
+    } else if f.starts_with("https://") || f.starts_with("http://") {
+        Some(f.to_string())
+    } else {
+        None
+    }
+}
+
+/// An HTTPS client (rustls with ring: two crypto providers are in the tree, the default must be named).
+pub fn http_client() -> Result<reqwest::Client> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder().timeout(Duration::from_secs(600)).user_agent("gangli").build().context("HTTPS client")
+}
+
+/// A release's `SHA256SUMS`: asset name → its SHA-256 (hex).
+pub async fn release_sums(http: &reqwest::Client, base: &str) -> Result<Vec<(String, String)>> {
+    let url = format!("{base}/SHA256SUMS");
+    let body = http.get(&url).send().await.with_context(|| format!("GET {url}"))?.error_for_status()?.bytes().await?;
+    let text = String::from_utf8_lossy(&body);
+    let sums: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (h, n) = (f.next()?, f.next()?.trim_start_matches('*'));
+            (h.len() == 64).then(|| (n.to_string(), h.to_lowercase()))
+        })
+        .collect();
+    if sums.is_empty() {
+        bail!("no SHA256SUMS at {url}");
+    }
+    Ok(sums)
+}
+
+/// Download a binary and check it against its SHA-256 (from the release's `SHA256SUMS`).
+pub async fn download(http: &reqwest::Client, url: &str, sha256: &str) -> Result<Vec<u8>> {
+    let r = http.get(url).send().await.with_context(|| format!("GET {url}"))?.error_for_status()?;
+    if r.content_length().is_some_and(|n| n > 200 << 20) {
+        bail!("{url}: too big");
+    }
+    let bytes = r.bytes().await.with_context(|| format!("download {url}"))?.to_vec();
+    let got = data_encoding::HEXLOWER.encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+    if !crate::util::eq_ct(&got, &sha256.to_lowercase()) {
+        bail!("{url}: SHA-256 does not match the release's SHA256SUMS");
+    }
+    Ok(bytes)
+}
+
+/// The binary for this computer from a release on the Internet (`release_url`).
+pub async fn fetch_own(base: &str) -> Result<Vec<u8>> {
+    let asset = asset_for(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| anyhow!("no release for this system"))?;
+    let http = http_client()?;
+    let sums = release_sums(&http, base).await?;
+    let sha = sums.iter().find(|(n, _)| n == asset).map(|(_, h)| h.clone()).ok_or_else(|| anyhow!("{asset} not in the release"))?;
+    download(&http, &format!("{base}/{asset}"), &sha).await
 }
 
 fn make_executable(p: &Path) -> Result<()> {
@@ -279,6 +348,16 @@ pub fn on_start() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_sources() {
+        assert_eq!(release_url("").unwrap(), format!("{RELEASES}/latest/download"));
+        assert_eq!(release_url("latest").unwrap(), format!("{RELEASES}/latest/download"));
+        assert_eq!(release_url("build-14").unwrap(), format!("{RELEASES}/download/build-14"));
+        assert_eq!(release_url("https://example.org/rel/").unwrap(), "https://example.org/rel");
+        assert!(release_url(r"C:\Users\me\rel").is_none());
+        assert!(release_url("out/rel14").is_none());
+    }
 
     #[test]
     fn checks_the_platform() {

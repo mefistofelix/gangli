@@ -1527,12 +1527,12 @@ fn api_help(c: &Console) -> Value {
             op("network_add", "admin", json!({ "code": "private code", "name": "optional" }), "add a network owned elsewhere"),
             op("network_codes", "admin", json!({ "name": "network" }), "a network's codes"),
             op("network_remove", "admin", json!({ "name": "network" }), "remove a network from this console"),
-            op("self_update", "admin", json!({ "from": "path of the new gangli binary, or of a folder with the release binaries" }), "update this computer's gangli: the new binary is tried, put in place, gangli restarts on it (the previous one is kept, and put back if the new one does not keep running); dropping it next to gangli as <name>.update does the same"),
+            op("self_update", "admin", json!({ "from": "optional: latest (default), build-N, an https folder, a binary or a local release folder" }), "update this computer's gangli: the new binary is tried, put in place, gangli restarts on it (the previous one is kept, and put back if the new one does not keep running); dropping it next to gangli as <name>.update does the same"),
             op("network_bundle", "admin", json!({ "names": ["network"] }), "what a gangli executable carries for these networks (public codes, relays); `gangli pack --network` makes one"),
             op("network_relays", "read / admin with set", json!({ "name": "network", "set": "optional list of https:// relay URLs ([] clears)" }), "a network's extra iroh relays (on top of the n0 ones), sent to its machines"),
             op("forget", "admin", json!({ "node": "name" }), "remove a machine from its network"),
-            op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "folder with the release binaries" }), "send machines a new gangli"),
-            op("power", "read; admin with set", json!({ "node": "machine name", "set": "optional: {sleep_ac, sleep_dc, hibernate_ac, hibernate_dc} minutes, 0 = never (Windows, macOS: sleep only); {sleep_blocked: true|false} on Linux" }), "a machine's power: plugged in or on battery, the charge, and its sleep / hibernation / screen-off timeouts; with `set` changes them first (the screen's timeout is never changed). A machine asleep is offline: keep it awake when plugged in"),
+            op("update", "admin", json!({ "nodes": ["names, empty: all online"], "from": "optional: latest (default), build-N, an https folder (each machine downloads its binary, checked against SHA256SUMS), or a local release folder (sent)" }), "update machines to a gangli release"),
+            op("power", "read; admin with keep_awake", json!({ "node": "machine name", "keep_awake": "optional: off | plugged | always" }), "a machine's power: plugged in or on battery, the charge, its own sleep / hibernation / screen-off timeouts (minutes, 0 = never; read only) and keep awake. A machine asleep is offline: `keep_awake` makes its gangli hold a temporary request to the OS not to sleep while idle (`plugged`: only on mains), until set back to `off`; its settings are never changed and the screen still turns off"),
             op("net_probe", "admin", json!({}), "look for a UDP port the router forwards to this computer (a machine outside sends the probes; about a minute at most); found: used from the next start. `status` shows the network (public addresses, NAT, UDP port)"),
             op("restart", "admin", json!({}), "restart this gangli (window and console), e.g. to use the UDP port just found"),
             op("stop", "admin", json!({}), "close this console"),
@@ -2095,7 +2095,10 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
         IpcOp::SelfUpdate { from } => {
             // Staged, then tried and swapped here; an open console restarts on it right after answering (its
             // window too), the other gangli of this folder (a service) within 30 s.
-            crate::update::stage_from(std::path::Path::new(&from))?;
+            match crate::update::release_url(&from) {
+                Some(base) => crate::update::stage(&crate::update::fetch_own(&base).await?)?,
+                None => crate::update::stage_from(std::path::Path::new(&from))?,
+            }
             let swapped = tokio::task::spawn_blocking(crate::update::apply_staged).await.map_err(|e| anyhow!("{e}"))??;
             if swapped && c.open {
                 tokio::spawn(async {
@@ -2105,10 +2108,10 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             }
             Ok(json!({ "updated": swapped, "restarting": swapped && c.open, "version_was": crate::build_version() }))
         }
-        IpcOp::Power { node, set } => {
+        IpcOp::Power { node, keep_awake } => {
             let (net, _, id) = find_node(c, &node)?;
             let conn = ensure_live(c, &net, &id).await?;
-            match proto::request(&conn, &Req::Power { set }).await? {
+            match proto::request(&conn, &Req::Power { keep_awake }).await? {
                 Resp::Power { power } => Ok(json!({ "node": node, "power": power })),
                 Resp::Error { message } => bail!("{message}"),
                 _ => bail!("unexpected answer"),
@@ -2125,6 +2128,13 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
             Ok(json!({ "restarting": true }))
         }
         IpcOp::Update { nodes, from } => {
+            // A release on the Internet: each machine downloads its binary itself (checked against the
+            // release's SHA256SUMS, read here once); a local folder: the bytes are sent.
+            let online = crate::update::release_url(&from);
+            let sums = match &online {
+                Some(base) => Some(crate::update::release_sums(&crate::update::http_client()?, base).await?),
+                None => None,
+            };
             let dir = std::path::PathBuf::from(&from);
             let targets: Vec<(String, String, String)> = if nodes.is_empty() {
                 let st = c.state.lock().unwrap();
@@ -2139,6 +2149,21 @@ pub async fn handle(c: &Arc<Console>, op: IpcOp) -> Result<Value> {
                     let inv = c.state.lock().unwrap().networks.iter().flat_map(|n| n.nodes.iter()).find(|x| x.id == id).and_then(|x| x.inventory.clone());
                     let inv = inv.ok_or_else(|| anyhow!("not online"))?;
                     let asset = crate::update::asset_for(&inv.platform, &inv.arch).ok_or_else(|| anyhow!("no release for {} {}", inv.platform, inv.arch))?;
+                    if let (Some(base), Some(sums)) = (&online, &sums) {
+                        let sha256 = sums.iter().find(|(n, _)| n == asset).map(|(_, h)| h.clone()).ok_or_else(|| anyhow!("{asset} not in the release"))?;
+                        let conn = ensure_live(c, &net, &id).await?;
+                        let (mut send, mut recv) = conn.open_bi().await.ctx("open stream")?;
+                        proto::write_frame(&mut send, &Req::UpdateUrl { url: format!("{base}/{asset}"), sha256 }).await?;
+                        let _ = send.finish();
+                        // Download and trial on the machine: minutes on a slow line.
+                        return match tokio::time::timeout(Duration::from_secs(900), proto::read_frame::<_, Resp>(&mut recv)).await {
+                            Ok(Ok(Resp::Updating)) => Ok(format!("{asset}, downloaded by the machine (was {})", inv.version)),
+                            Ok(Ok(Resp::Error { message })) => bail!("{message}"),
+                            Ok(Ok(_)) => bail!("unexpected answer"),
+                            Ok(Err(e)) => Err(e),
+                            Err(_) => bail!("no answer"),
+                        };
+                    }
                     let bytes = tokio::fs::read(dir.join(asset)).await.with_context(|| format!("{asset} not in {from}"))?;
                     crate::update::check(&bytes, &inv.platform, &inv.arch)?;
                     let conn = ensure_live(c, &net, &id).await?;

@@ -378,13 +378,17 @@ the answers in `gangli.console` (`places`). The address goes to DB-IP, nothing e
 Machines list *Place*, machine details, `gangli info`, API `nodes` / `info` → `place`; the console's own
 in *This computer → Network*. Lookups are console-side only: a node never calls out for this.
 
-**Power [decided 2026-11-22]**: a managed machine that sleeps or hibernates is offline until someone wakes
-it (seen on the aunt's laptop: S3 sleep). The owner reads and sets a machine's sleep and hibernation
-timeouts, plugged in and on battery, from a console (machine details → *Sleep settings…*, `gangli power NODE
---sleep-ac 0`, API `power`; `Req::Power`). The screen's timeout is shown and never changed: the screen still
-turns off. Windows: the active power plan through the power API (powrprof, no external program); macOS:
-`pmset` (sleep only, hibernation follows it); Linux: sleep is on or off for the whole system (systemd's
-sleep targets masked), the idle timeouts belong to the desktop. Changing them needs the service.
+**Power: keep awake, never a changed setting [decided 2026-11-22]**: a managed machine that sleeps or
+hibernates is offline until someone wakes it (seen on the aunt's laptop: S3 sleep). The owner can have its
+gangli *keep it awake*: `off` (default), `plugged` (only while on mains: a laptop on battery sleeps as usual)
+or `always` (machine details → *Power…*, `gangli power NODE --keep-awake plugged`, API `power`;
+`Req::Power`; kept as `keep_awake` in `[node]` of `gangli.node`, so it holds again after a restart). It is a
+temporary request to the OS, held by the running node: **no setting of the machine is changed**, the request
+ends when it is set back to `off` or gangli stops, and everything is as the user left it. The screen still
+turns off. Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` (shown by `powercfg /requests`); macOS:
+an IOKit assertion PreventUserIdleSystemSleep (`pmset -g assertions`); Linux: a logind `sleep:idle`
+inhibitor over D-Bus (`systemd-inhibit --list`). The machine's own sleep / hibernation / screen timeouts are
+shown, read only (Windows power API, macOS `pmset -g custom`).
 
 Names: the admitting console names nodes (slug of the hostname and, when someone is logged in, that user:
 `asuspc-rocar` **[decided 2026-11-22]**; unique per network, written in their certificate); addressing is `name` or
@@ -462,9 +466,14 @@ Names: the admitting console names nodes (slug of the hostname and, when someone
 - **One convention for every OS and every way gangli runs [decided 2026-11-22]** (service, node by hand,
   window, `console run`; as SYSTEM / root or as a user): **the new binary goes next to the running one as
   `<binary>.update`** (`gangli.update`, `gangli.exe.update`). It gets there by hand, by `gangli self-update
-  --from <binary|release folder>` / the API's `self_update` (this computer's gangli), or over a session when
-  a console updates a machine (`gangli update [machines…] --from <release folder>`, the console picking each
-  machine's binary from its inventory). Then:
+  [--from latest|build-N|<https folder>|<binary>|<release folder>]` / the API's `self_update` (this
+  computer's gangli), or when a console updates a machine (`gangli update [machines…] [--from …]`, the
+  console picking each machine's binary from its inventory). **From a release on the Internet (the default,
+  `latest`) the machine downloads its binary itself [decided 2026-11-22]**: the console reads the release's
+  `SHA256SUMS` from GitHub and sends only the address and the SHA-256 (`Req::UpdateUrl`); the machine
+  downloads it straight from GitHub, not through a relay (22 MB through a rate-limited relay to a 4G
+  machine took minutes), and refuses it if the SHA-256 differs. From a local folder (development builds)
+  the console still sends the bytes over the session (`Req::Update`). Then:
   1. *Trial*: a first look (PE, ELF with the right machine, Mach-O), then the candidate is run: `version
      --json` must answer this OS and architecture within 20 s (a damaged file, the wrong one, an unsigned
      macOS binary fail here). A failed one is set aside as `<binary>.failed`; nothing changes.

@@ -41,6 +41,9 @@ pub struct Inventory {
     pub on_ac: Option<bool>,
     #[serde(default)]
     pub battery: Option<u8>,
+    /// gangli keeps it awake now (a temporary request; its sleep settings are untouched).
+    #[serde(default)]
+    pub awake: bool,
     /// Who is logged in now (Windows: a session not connected to the screen is marked "(disconnected)").
     #[serde(default)]
     pub logged_in: Vec<String>,
@@ -102,7 +105,7 @@ impl Inventory {
             self.net.udp_v4, self.net.udp_v6, self.net.nat_varies, self.net.public_v6.is_empty(),
             self.net.public_v4.rsplit_once(':').map(|(ip, _)| ip),
             // plugged in or not, who is there; the charge only by fifths (and below 10 %), not every percent
-            self.on_ac, self.logged_in, self.battery.map(|b| if b < 10 { 0 } else { 1 + b / 20 })
+            self.on_ac, self.awake, self.logged_in, self.battery.map(|b| if b < 10 { 0 } else { 1 + b / 20 })
         ])
         .to_string()
     }
@@ -137,12 +140,18 @@ impl Inventory {
             Some(true) => "plugged in",
             Some(false) => "on battery",
             None if self.battery.is_some() => "battery",
-            None => return String::new(),
+            None => "",
         };
+        let mut parts = vec![];
         match self.battery {
-            Some(b) => format!("{src}, {b} %"),
-            None => src.to_string(),
+            Some(b) => parts.push(format!("{src}, {b} %")),
+            None if !src.is_empty() => parts.push(src.to_string()),
+            None => {}
         }
+        if self.awake {
+            parts.push("kept awake".to_string());
+        }
+        parts.join(" · ")
     }
 
     pub fn os_label(&self) -> String {
@@ -208,6 +217,7 @@ pub fn collect() -> Inventory {
         ..Default::default()
     };
     (inv.on_ac, inv.battery) = crate::power::source();
+    inv.awake = crate::power::held();
     if inv.hostname.is_empty() {
         inv.hostname = std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))

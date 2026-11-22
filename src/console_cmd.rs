@@ -523,12 +523,9 @@ pub fn update(nodes: Vec<String>, from: String, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `gangli self-update --from <binary or release folder>`: through the open console (which restarts on it),
-/// else here (the gangli of this folder, a service too, restarts on it within 30 s).
-/// `gangli power NODE [--sleep-ac MIN …]`.
-pub fn power(node: String, set: crate::power::PowerSet, json: bool) -> Result<()> {
-    let changing = !set.is_empty();
-    let v = ipc::call(IpcOp::Power { node, set: changing.then_some(set) })?;
+/// `gangli power NODE [--keep-awake off|plugged|always]`.
+pub fn power(node: String, keep_awake: Option<crate::power::KeepAwake>, json: bool) -> Result<()> {
+    let v = ipc::call(IpcOp::Power { node, keep_awake })?;
     if json {
         print_json(&v);
         return Ok(());
@@ -536,19 +533,24 @@ pub fn power(node: String, set: crate::power::PowerSet, json: bool) -> Result<()
     let p: crate::power::Power = serde_json::from_value(v["power"].clone())?;
     let inv = crate::inventory::Inventory { on_ac: p.on_ac, battery: p.battery, ..Default::default() };
     let label = crate::power::minutes_label;
-    println!("{}{}", s_or(&inv.power_label(), "power source unknown"), if changing { " (changed)" } else { "" });
-    println!("{:<12} {:>12} {:>12}", "", "plugged in", "on battery");
-    for (what, ac, dc) in [("sleep", p.sleep_ac, p.sleep_dc), ("hibernate", p.hibernate_ac, p.hibernate_dc), ("screen off", p.display_ac, p.display_dc)] {
-        if ac.is_some() || dc.is_some() {
-            println!("{what:<12} {:>12} {:>12}", label(ac), label(dc));
+    println!("{}", s_or(&inv.power_label(), "power source unknown"));
+    if [p.sleep_ac, p.sleep_dc, p.hibernate_ac, p.hibernate_dc, p.display_ac, p.display_dc].iter().any(Option::is_some) {
+        println!("its settings  {:>12} {:>12}", "plugged in", "on battery");
+        for (what, ac, dc) in [("sleep", p.sleep_ac, p.sleep_dc), ("hibernate", p.hibernate_ac, p.hibernate_dc), ("screen off", p.display_ac, p.display_dc)] {
+            if ac.is_some() || dc.is_some() {
+                println!("  {what:<11} {:>12} {:>12}", label(ac), label(dc));
+            }
         }
     }
-    if let Some(b) = p.sleep_blocked {
-        println!("sleep and hibernation: {}", if b { "off for the whole system" } else { "allowed" });
-    }
-    if !p.note.is_empty() {
-        println!("{}", p.note);
-    }
+    println!(
+        "keep awake: {}{}",
+        p.keep_awake.label(),
+        match (p.keep_awake, p.awake) {
+            (crate::power::KeepAwake::Off, _) => "",
+            (_, true) => " (held now: it does not sleep while idle; the screen still turns off)",
+            (_, false) => " (not held now: on battery)",
+        }
+    );
     Ok(())
 }
 
@@ -558,6 +560,17 @@ fn s_or(s: &str, or: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// `gangli restart`: only an open console (a one-shot one has nothing to restart).
+pub fn restart(json: bool) -> Result<()> {
+    let v = ipc::call_open(IpcOp::Restart)?.ok_or_else(|| anyhow::anyhow!("no open console in this folder"))?;
+    if json {
+        print_json(&v);
+    } else {
+        println!("the console restarts");
+    }
+    Ok(())
 }
 
 /// `gangli net [--probe]`.
@@ -594,6 +607,8 @@ pub fn udp_port_text(n: &serde_json::Value) -> String {
     }
 }
 
+/// `gangli self-update --from <binary or release folder>`: through the open console (which restarts on it),
+/// else here (the gangli of this folder, a service too, restarts on it within 30 s).
 pub fn self_update(from: String, json: bool) -> Result<()> {
     let from = std::fs::canonicalize(&from).map(|p| p.display().to_string()).unwrap_or(from);
     let v = ipc::call(IpcOp::SelfUpdate { from })?;

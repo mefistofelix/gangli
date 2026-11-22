@@ -52,6 +52,14 @@ pub struct NodeConf {
     /// A fixed UDP port for its endpoint (one the router forwards here); none: a random one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp_port: Option<u16>,
+    /// Keep this machine awake (a temporary request to the OS, held while the node runs; its settings are
+    /// never changed): `off`, `plugged` (while on mains), `always`. Set from a console.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub keep_awake: crate::power::KeepAwake,
+}
+
+fn is_off(k: &crate::power::KeepAwake) -> bool {
+    *k == crate::power::KeepAwake::Off
 }
 
 pub const STATUS_PORT: u16 = 7374;
@@ -86,6 +94,7 @@ impl Default for NodeConf {
             window_node: true,
             status_port: None,
             udp_port: None,
+            keep_awake: Default::default(),
         }
     }
 }

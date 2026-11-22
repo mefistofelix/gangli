@@ -1,14 +1,47 @@
-//! Power on a node: mains or battery, and its sleep / hibernation settings, read and set from a console
-//! (section 8 of docs/ARCHITECTURE.md). A managed machine that goes to sleep drops off the network until
-//! someone wakes it; these settings let the owner keep it awake when plugged in. The screen's own timeout is
-//! shown and never changed: the screen still turns off.
+//! Power on a node (section 9 of docs/ARCHITECTURE.md): mains or battery, the system's own sleep /
+//! hibernation / screen timeouts (read only), and *keep awake*: a temporary request to the OS not to go to
+//! sleep while idle, held by the running node while the owner wants it. No system setting is ever changed:
+//! the request ends when it is turned off or the node stops, and everything is as the user set it. The
+//! screen still turns off. It shows in the system's own tools (Windows `powercfg /requests`, macOS
+//! `pmset -g assertions`, Linux `systemd-inhibit --list`).
 //!
-//! Windows: the power API of the active plan (powrprof; no external program). macOS: `pmset`. Linux: sleep is
-//! all or nothing for the whole system (systemd's sleep targets masked or not); idle timeouts belong to the
-//! desktop session. Changing them needs the service (SYSTEM / root).
+//! Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` on a thread of its own; macOS: an IOKit power
+//! assertion (PreventUserIdleSystemSleep); Linux: a logind inhibitor (sleep:idle, over D-Bus).
 
-use anyhow::{bail, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
+
+/// When the node keeps its machine awake (`[node] keep_awake` in `gangli.node`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAwake {
+    /// As the machine is set (default).
+    #[default]
+    Off,
+    /// While on mains (a laptop on battery sleeps as usual).
+    Plugged,
+    Always,
+}
+
+impl KeepAwake {
+    pub fn label(self) -> &'static str {
+        match self {
+            KeepAwake::Off => "off",
+            KeepAwake::Plugged => "when plugged in",
+            KeepAwake::Always => "always",
+        }
+    }
+
+    /// Whether to hold the request now.
+    pub fn wanted(self, on_ac: Option<bool>) -> bool {
+        match self {
+            KeepAwake::Off => false,
+            KeepAwake::Plugged => on_ac != Some(false),
+            KeepAwake::Always => true,
+        }
+    }
+}
 
 /// Minutes (0: never; `None`: not available on this system).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -17,60 +50,55 @@ pub struct Power {
     pub on_ac: Option<bool>,
     /// Battery charge, percent (`None`: no battery).
     pub battery: Option<u8>,
-    /// Plugged in (`_ac`) and on battery (`_dc`).
+    /// The system's own timeouts, plugged in (`_ac`) and on battery (`_dc`): shown, never changed.
     pub sleep_ac: Option<u32>,
     pub sleep_dc: Option<u32>,
     pub hibernate_ac: Option<u32>,
     pub hibernate_dc: Option<u32>,
     pub display_ac: Option<u32>,
     pub display_dc: Option<u32>,
-    /// Linux: sleep and hibernation are turned off for the whole system.
-    pub sleep_blocked: Option<bool>,
-    /// What can be set here, or why not.
-    pub note: String,
+    /// gangli's temporary request, as set and whether it is held now.
+    pub keep_awake: KeepAwake,
+    pub awake: bool,
 }
 
-/// A change: only the fields given are set.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct PowerSet {
-    #[serde(default)]
-    pub sleep_ac: Option<u32>,
-    #[serde(default)]
-    pub sleep_dc: Option<u32>,
-    #[serde(default)]
-    pub hibernate_ac: Option<u32>,
-    #[serde(default)]
-    pub hibernate_dc: Option<u32>,
-    #[serde(default)]
-    pub sleep_blocked: Option<bool>,
-}
-
-impl PowerSet {
-    pub fn is_empty(&self) -> bool {
-        *self == PowerSet::default()
-    }
-}
-
-/// Mains or battery and the charge: cheap, for the inventory.
+/// Mains or battery and the charge: cheap, for the inventory and the keep-awake check.
 pub fn source() -> (Option<bool>, Option<u8>) {
     imp::source()
 }
 
+/// What the machine is set to (and, from the caller, gangli's keep-awake).
 pub fn read() -> Power {
-    let mut p = imp::read();
+    let mut p = imp::timeouts();
     (p.on_ac, p.battery) = source();
+    p.awake = held();
     p
 }
 
-pub fn set(s: &PowerSet) -> Result<Power> {
-    if s.is_empty() {
-        return Ok(read());
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// gangli's request is held now.
+pub fn held() -> bool {
+    HELD.load(Ordering::SeqCst)
+}
+
+/// Hold the request (`true`) or let it go; called by the node's loop every few seconds, cheap when nothing
+/// changes. Errors are logged once per change.
+pub async fn hold(want: bool) {
+    if want == held() {
+        return;
     }
-    if [s.sleep_ac, s.sleep_dc, s.hibernate_ac, s.hibernate_dc].iter().flatten().any(|m| *m > 24 * 60 * 7) {
-        bail!("a timeout of more than a week: use 0 for never");
+    match imp::hold(want).await {
+        Ok(()) => {
+            HELD.store(want, Ordering::SeqCst);
+            crate::log_line(if want { "keeping this machine awake (a temporary request; its settings are untouched)" } else { "no longer keeping this machine awake" });
+        }
+        Err(e) => {
+            // Not retried every loop: marked as done, the next change tries again.
+            HELD.store(want, Ordering::SeqCst);
+            crate::log_line(&format!("keep awake: {e:#}"));
+        }
     }
-    imp::set(s)?;
-    Ok(read())
 }
 
 /// "never", "10 min", "2 h".
@@ -85,15 +113,19 @@ pub fn minutes_label(m: Option<u32>) -> String {
 
 #[cfg(windows)]
 mod imp {
-    use anyhow::{bail, Result};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use anyhow::Result;
     use windows_sys::core::GUID;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::System::Power::{
-        GetSystemPowerStatus, PowerGetActiveScheme, PowerReadACValueIndex, PowerReadDCValueIndex, PowerSetActiveScheme, PowerWriteACValueIndex,
-        PowerWriteDCValueIndex, SYSTEM_POWER_STATUS,
+        GetSystemPowerStatus, PowerGetActiveScheme, PowerReadACValueIndex, PowerReadDCValueIndex, SetThreadExecutionState, ES_CONTINUOUS,
+        ES_SYSTEM_REQUIRED, SYSTEM_POWER_STATUS,
     };
 
-    use super::{Power, PowerSet};
+    use super::Power;
 
     const SUB_SLEEP: GUID = GUID::from_u128(0x238c9fa8_0aad_41ed_83f4_97be242c8f20);
     const STANDBY_IDLE: GUID = GUID::from_u128(0x29f6c1db_86da_48c5_9fdb_f2b67b1f44da);
@@ -116,7 +148,7 @@ mod imp {
         (on_ac, battery)
     }
 
-    /// The active power plan (its GUID), freed after use.
+    /// The active power plan (its GUID).
     fn active() -> Option<GUID> {
         let mut p: *mut GUID = std::ptr::null_mut();
         if unsafe { PowerGetActiveScheme(std::ptr::null_mut(), &mut p) } != 0 || p.is_null() {
@@ -140,12 +172,10 @@ mod imp {
         (r == 0).then_some(v / 60)
     }
 
-    pub fn read() -> Power {
-        let Some(s) = active() else {
-            return Power { note: "cannot read the power plan".into(), ..Default::default() };
-        };
+    pub fn timeouts() -> Power {
+        let Some(s) = active() else { return Power::default() };
         let battery = source().1.is_some();
-        let dc = |sub: &GUID, set: &GUID| if battery { get(&s, sub, set, false) } else { None };
+        let dc = |sub: &GUID, setting: &GUID| if battery { get(&s, sub, setting, false) } else { None };
         Power {
             sleep_ac: get(&s, &SUB_SLEEP, &STANDBY_IDLE, true),
             sleep_dc: dc(&SUB_SLEEP, &STANDBY_IDLE),
@@ -153,47 +183,61 @@ mod imp {
             hibernate_dc: dc(&SUB_SLEEP, &HIBERNATE_IDLE),
             display_ac: get(&s, &SUB_VIDEO, &VIDEO_IDLE, true),
             display_dc: dc(&SUB_VIDEO, &VIDEO_IDLE),
-            note: if crate::elevate::is_root() { String::new() } else { "the node runs as a user: changing these may need the service".into() },
             ..Default::default()
         }
     }
 
-    pub fn set(p: &PowerSet) -> Result<()> {
-        if p.sleep_blocked.is_some() {
-            bail!("on Windows sleep is set with its timeouts (0: never)");
-        }
-        let Some(s) = active() else { bail!("cannot read the power plan") };
-        let w = |setting: &GUID, ac: bool, min: Option<u32>| -> Result<()> {
-            let Some(m) = min else { return Ok(()) };
-            let r = unsafe {
-                if ac {
-                    PowerWriteACValueIndex(std::ptr::null_mut(), &s, &SUB_SLEEP, setting, m * 60)
-                } else {
-                    PowerWriteDCValueIndex(std::ptr::null_mut(), &s, &SUB_SLEEP, setting, m * 60)
+    static WANT: AtomicBool = AtomicBool::new(false);
+    static THREAD: OnceLock<()> = OnceLock::new();
+
+    /// The execution state belongs to a thread: one thread of its own sets it and keeps it as wanted.
+    pub async fn hold(want: bool) -> Result<()> {
+        WANT.store(want, Ordering::SeqCst);
+        THREAD.get_or_init(|| {
+            std::thread::spawn(|| {
+                let mut was = false;
+                loop {
+                    let want = WANT.load(Ordering::SeqCst);
+                    if want != was {
+                        let flags = if want { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS };
+                        unsafe { SetThreadExecutionState(flags) };
+                        was = want;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
                 }
-            };
-            if r != 0 {
-                bail!("cannot change the power plan: {}", std::io::Error::from_raw_os_error(r as i32));
-            }
-            Ok(())
-        };
-        w(&STANDBY_IDLE, true, p.sleep_ac)?;
-        w(&STANDBY_IDLE, false, p.sleep_dc)?;
-        w(&HIBERNATE_IDLE, true, p.hibernate_ac)?;
-        w(&HIBERNATE_IDLE, false, p.hibernate_dc)?;
-        // Applying the plan again makes the change take effect now.
-        unsafe { PowerSetActiveScheme(std::ptr::null_mut(), &s) };
+            });
+        });
         Ok(())
     }
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use std::ffi::{c_char, c_void};
     use std::process::Command;
+    use std::sync::Mutex;
 
     use anyhow::{bail, Result};
 
-    use super::{Power, PowerSet};
+    use super::Power;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, encoding: u32) -> *const c_void;
+        fn CFRelease(p: *const c_void);
+    }
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPMAssertionCreateWithName(kind: *const c_void, level: u32, name: *const c_void, id: *mut u32) -> i32;
+        fn IOPMAssertionRelease(id: u32) -> i32;
+    }
+    const UTF8: u32 = 0x0800_0100;
+    const LEVEL_ON: u32 = 255;
+
+    fn cfstr(s: &str) -> *const c_void {
+        let c = std::ffi::CString::new(s).unwrap_or_default();
+        unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), UTF8) }
+    }
 
     fn pmset(args: &[&str]) -> Option<String> {
         let out = Command::new("pmset").args(args).output().ok()?;
@@ -214,11 +258,10 @@ mod imp {
     }
 
     /// `pmset -g custom`: "Battery Power:" and "AC Power:" sections of "key value" lines.
-    fn custom() -> (Vec<(String, u32)>, Vec<(String, u32)>) {
-        let (mut ac, mut dc) = (vec![], vec![]);
-        let Some(t) = pmset(&["-g", "custom"]) else { return (ac, dc) };
+    pub fn timeouts() -> Power {
+        let (mut ac, mut dc): (Vec<(String, u32)>, Vec<(String, u32)>) = (vec![], vec![]);
         let mut cur = 0;
-        for l in t.lines() {
+        for l in pmset(&["-g", "custom"]).unwrap_or_default().lines() {
             if l.starts_with("AC Power") {
                 cur = 1;
             } else if l.starts_with("Battery Power") {
@@ -234,32 +277,29 @@ mod imp {
                 }
             }
         }
-        (ac, dc)
-    }
-
-    pub fn read() -> Power {
-        let (ac, dc) = custom();
         let get = |l: &[(String, u32)], k: &str| l.iter().find(|(x, _)| x == k).map(|(_, v)| *v);
-        Power {
-            sleep_ac: get(&ac, "sleep"),
-            sleep_dc: get(&dc, "sleep"),
-            display_ac: get(&ac, "displaysleep"),
-            display_dc: get(&dc, "displaysleep"),
-            note: "macOS: hibernation follows sleep (hibernatemode)".into(),
-            ..Default::default()
-        }
+        Power { sleep_ac: get(&ac, "sleep"), sleep_dc: get(&dc, "sleep"), display_ac: get(&ac, "displaysleep"), display_dc: get(&dc, "displaysleep"), ..Default::default() }
     }
 
-    pub fn set(p: &PowerSet) -> Result<()> {
-        if p.hibernate_ac.is_some() || p.hibernate_dc.is_some() || p.sleep_blocked.is_some() {
-            bail!("on macOS only the sleep timeouts can be set");
-        }
-        for (flag, m) in [("-c", p.sleep_ac), ("-b", p.sleep_dc)] {
-            if let Some(m) = m {
-                let out = Command::new("pmset").args([flag, "sleep", &m.to_string()]).output()?;
-                if !out.status.success() {
-                    bail!("pmset: {}", String::from_utf8_lossy(&out.stderr).trim());
-                }
+    static ID: Mutex<Option<u32>> = Mutex::new(None);
+
+    pub async fn hold(want: bool) -> Result<()> {
+        let mut id = ID.lock().unwrap();
+        if want && id.is_none() {
+            let (kind, name) = (cfstr("PreventUserIdleSystemSleep"), cfstr("gangli: kept awake from a gangli console"));
+            let mut a = 0u32;
+            let r = unsafe { IOPMAssertionCreateWithName(kind, LEVEL_ON, name, &mut a) };
+            unsafe {
+                CFRelease(kind);
+                CFRelease(name);
+            }
+            if r != 0 {
+                bail!("power assertion refused ({r})");
+            }
+            *id = Some(a);
+        } else if !want {
+            if let Some(a) = id.take() {
+                unsafe { IOPMAssertionRelease(a) };
             }
         }
         Ok(())
@@ -268,13 +308,11 @@ mod imp {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod imp {
-    use std::process::Command;
+    use std::sync::Mutex;
 
-    use anyhow::{bail, Result};
+    use anyhow::{Context, Result};
 
-    use super::{Power, PowerSet};
-
-    const TARGETS: [&str; 5] = ["sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target", "suspend-then-hibernate.target"];
+    use super::Power;
 
     pub fn source() -> (Option<bool>, Option<u8>) {
         let (mut mains, mut charging, mut battery) = (None, None, None);
@@ -294,27 +332,35 @@ mod imp {
         (mains.or(charging), battery)
     }
 
-    pub fn read() -> Power {
-        let blocked = Command::new("systemctl").args(["is-enabled", "suspend.target"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "masked");
-        Power {
-            sleep_blocked: blocked,
-            note: "Linux: sleep and hibernation are on or off for the whole system; idle timeouts belong to the desktop".into(),
-            ..Default::default()
-        }
+    /// Idle timeouts belong to the desktop session on Linux: none to show.
+    pub fn timeouts() -> Power {
+        Power::default()
     }
 
-    pub fn set(p: &PowerSet) -> Result<()> {
-        if [p.sleep_ac, p.sleep_dc, p.hibernate_ac, p.hibernate_dc].iter().any(Option::is_some) {
-            bail!("on Linux sleep is on or off for the whole system (sleep_blocked)");
+    /// The logind inhibitor lives as long as this descriptor.
+    static FD: Mutex<Option<zbus::zvariant::OwnedFd>> = Mutex::new(None);
+
+    pub async fn hold(want: bool) -> Result<()> {
+        if !want {
+            FD.lock().unwrap().take();
+            return Ok(());
         }
-        if let Some(b) = p.sleep_blocked {
-            let mut args = vec![if b { "mask" } else { "unmask" }];
-            args.extend(TARGETS);
-            let out = Command::new("systemctl").args(&args).output()?;
-            if !out.status.success() {
-                bail!("systemctl: {}", String::from_utf8_lossy(&out.stderr).trim());
-            }
+        if FD.lock().unwrap().is_some() {
+            return Ok(());
         }
+        let conn = zbus::Connection::system().await.context("system D-Bus")?;
+        let msg = conn
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1",
+                Some("org.freedesktop.login1.Manager"),
+                "Inhibit",
+                &("sleep:idle", "gangli", "kept awake from a gangli console", "block"),
+            )
+            .await
+            .context("logind inhibitor")?;
+        let fd: zbus::zvariant::OwnedFd = msg.body().deserialize().context("logind inhibitor")?;
+        *FD.lock().unwrap() = Some(fd);
         Ok(())
     }
 }
@@ -324,14 +370,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn labels_and_sets() {
+    fn labels_and_modes() {
         assert_eq!(minutes_label(Some(0)), "never");
         assert_eq!(minutes_label(Some(120)), "2 h");
         assert_eq!(minutes_label(Some(15)), "15 min");
-        assert!(PowerSet::default().is_empty());
-        let s: PowerSet = serde_json::from_str(r#"{"sleep_ac":0}"#).unwrap();
-        assert_eq!(s.sleep_ac, Some(0));
-        assert!(set(&PowerSet { sleep_ac: Some(100_000), ..Default::default() }).is_err());
+        assert!(!KeepAwake::Off.wanted(Some(true)));
+        assert!(KeepAwake::Plugged.wanted(Some(true)) && KeepAwake::Plugged.wanted(None));
+        assert!(!KeepAwake::Plugged.wanted(Some(false)));
+        assert!(KeepAwake::Always.wanted(Some(false)));
+        assert_eq!(serde_json::to_string(&KeepAwake::Plugged).unwrap(), "\"plugged\"");
         // Reading never fails, whatever the system (CI runners included).
         let _ = read();
     }

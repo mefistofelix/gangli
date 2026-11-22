@@ -181,13 +181,17 @@ pub enum Req {
     JobList,
     JobOutput { id: String, from: u64 },
     JobKill { id: String },
+    /// Console → node: download a new binary from `url` (a release on the Internet), check it against
+    /// `sha256` (from the release's `SHA256SUMS`), try it and put it in place; answer `Updating`.
+    UpdateUrl { url: String, sha256: String },
     /// Console → node: a new binary follows (`size` raw bytes after this frame); tried before it is put in place.
     Update { size: u64 },
     /// Console → node: send one UDP datagram holding `token` to each of `ports` of `ip` (the console's public
     /// IPv4), paced, to find a port its router forwards to it. At most [`PROBE_MAX`] ports a request.
     ProbeUdp { ip: String, ports: Vec<u16>, token: String },
-    /// Console → node: its power (mains / battery, sleep and hibernation), changed first with `set`.
-    Power { #[serde(default)] set: Option<crate::power::PowerSet> },
+    /// Console → node: its power (mains / battery, its sleep settings, keep awake); with `keep_awake`, set
+    /// that first (a temporary request to the OS; no setting of the machine is changed).
+    Power { #[serde(default)] keep_awake: Option<crate::power::KeepAwake> },
     /// Console → node, inside a `Stream`: attach to the persistent terminal `name` (started if missing).
     Attach { name: String, user: String, cols: u16, rows: u16 },
     TermList,

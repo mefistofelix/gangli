@@ -167,42 +167,34 @@ enum Command {
     /// console: background jobs on a machine: they keep running and keep their output without a console.
     #[command(subcommand)]
     Job(JobCmd),
-    /// console: send the machines a new release (from a folder: `gh release download build-N -D <dir>`).
+    /// console: update machines to a release. From the Internet (`latest`, `build-N`, an https folder) each
+    /// machine downloads its binary itself, checked against the release's SHA256SUMS; from a local folder
+    /// (`gh release download build-N -D <dir>`) the console sends it.
     Update {
         /// Machines (default: every machine online now).
         nodes: Vec<String>,
-        /// Folder with the release binaries (gangli-linux-x86_64, gangli-windows-x86_64.exe, …).
-        #[arg(long)]
+        /// latest, build-N, an https folder, or a local folder with the release binaries.
+        #[arg(long, default_value = "latest")]
         from: String,
     },
-    /// Update this gangli: a new binary (or a release folder) tried, put in place, the running gangli of this
-    /// folder restarted on it, the previous one kept and put back if the new one does not keep running.
-    /// Dropping the new binary next to this one as `<name>.update` does the same.
+    /// Update this gangli: a new binary tried, put in place, the running gangli of this folder restarted on
+    /// it, the previous one kept and put back if the new one does not keep running. Dropping the new binary
+    /// next to this one as `<name>.update` does the same.
     #[command(name = "self-update")]
     SelfUpdate {
-        /// The new binary, or a folder with the release binaries.
-        #[arg(long)]
+        /// latest, build-N, an https folder, a binary or a local folder with the release binaries.
+        #[arg(long, default_value = "latest")]
         from: String,
     },
-    /// A machine's power: plugged in or on battery, sleep and hibernation (minutes, 0 = never). The screen's
-    /// timeout is shown, never changed.
+    /// console: restart the open console (and its window), e.g. to use the UDP port just found.
+    Restart,
+    /// A machine's power: plugged in or on battery, its own sleep settings (shown, never changed) and keep
+    /// awake: a temporary request to its OS not to sleep while idle; the screen still turns off.
     Power {
         node: String,
-        /// Sleep after this many minutes when plugged in (0: never).
-        #[arg(long)]
-        sleep_ac: Option<u32>,
-        /// Sleep after this many minutes on battery (0: never).
-        #[arg(long)]
-        sleep_battery: Option<u32>,
-        /// Hibernate after this many minutes when plugged in (0: never; Windows).
-        #[arg(long)]
-        hibernate_ac: Option<u32>,
-        /// Hibernate after this many minutes on battery (0: never; Windows).
-        #[arg(long)]
-        hibernate_battery: Option<u32>,
-        /// Linux: turn sleep and hibernation off (true) or on (false) for the whole system.
-        #[arg(long)]
-        sleep_blocked: Option<bool>,
+        /// off | plugged (only on mains) | always.
+        #[arg(long, value_parser = parse_keep_awake)]
+        keep_awake: Option<power::KeepAwake>,
     },
     /// This console's network: public addresses, NAT, the UDP port (and whether the router forwards one).
     Net {
@@ -566,10 +558,8 @@ fn main() {
         Some(Command::DebugDrop { node }) => ipc::call(ipc::IpcOp::DebugDrop { node }).map(|v| println!("{v}")),
         Some(Command::SelfUpdate { from }) => console_cmd::self_update(from, json),
         Some(Command::Net { probe }) => console_cmd::net(probe, json),
-        Some(Command::Power { node, sleep_ac, sleep_battery, hibernate_ac, hibernate_battery, sleep_blocked }) => {
-            let set = power::PowerSet { sleep_ac, sleep_dc: sleep_battery, hibernate_ac, hibernate_dc: hibernate_battery, sleep_blocked };
-            console_cmd::power(node, set, json)
-        }
+        Some(Command::Restart) => console_cmd::restart(json),
+        Some(Command::Power { node, keep_awake }) => console_cmd::power(node, keep_awake, json),
     };
     if long_running && result.is_ok() {
         update::confirm();
@@ -602,6 +592,15 @@ pub(crate) fn log_line(msg: &str) {
 }
 
 /// Append a timestamped line to `gangli.log` next to the binary, restarting it past 1 MB.
+fn parse_keep_awake(s: &str) -> Result<power::KeepAwake, String> {
+    match s {
+        "off" => Ok(power::KeepAwake::Off),
+        "plugged" => Ok(power::KeepAwake::Plugged),
+        "always" => Ok(power::KeepAwake::Always),
+        _ => Err("off, plugged or always".into()),
+    }
+}
+
 pub(crate) fn log_to_file(msg: &str) {
     use std::io::Write;
     let path = paths::log_file();

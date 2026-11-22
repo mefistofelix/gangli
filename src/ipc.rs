@@ -57,13 +57,17 @@ pub enum IpcOp {
     JobList { node: String },
     JobOutput { node: String, job: String, from: Option<u64> },
     JobKill { node: String, job: String },
-    Update { nodes: Vec<String>, from: String },
-    /// Update this computer's gangli (the console's binary): `from` a binary or a release folder.
-    SelfUpdate { from: String },
+    /// Update machines (none: every one online) from a release: `latest` (or nothing), `build-N`, an https
+    /// folder (the machines download it), or a local folder (sent to them).
+    Update { nodes: Vec<String>, #[serde(default)] from: String },
+    /// Update this computer's gangli (the console's binary): `latest` (or nothing), `build-N`, an https
+    /// folder, a binary or a local release folder.
+    SelfUpdate { #[serde(default)] from: String },
     /// Look again for a UDP port the router forwards to this computer (a machine outside sends the probes).
     NetProbe,
-    /// A machine's power: mains / battery, sleep and hibernation; changed first with `set`.
-    Power { node: String, #[serde(default)] set: Option<crate::power::PowerSet> },
+    /// A machine's power: mains / battery, its sleep settings (read only) and keep awake, set first with
+    /// `keep_awake` (`off`, `plugged`, `always`: a temporary request, the machine's settings untouched).
+    Power { node: String, #[serde(default)] keep_awake: Option<crate::power::KeepAwake> },
     /// Restart this gangli (window and console) on the same binary, e.g. to bind the UDP port just found.
     Restart,
     DebugDrop { node: String },
@@ -91,7 +95,7 @@ impl IpcOp {
             // the API itself and its tokens.
             IpcOp::SshLoginAdd { .. } | IpcOp::SshLoginRemove { .. } | IpcOp::SshLoginSet { .. } | IpcOp::Stop => Some("admin"),
             IpcOp::NetProbe | IpcOp::Restart => Some("admin"),
-            IpcOp::Power { set: None, .. } => Some("read"),
+            IpcOp::Power { keep_awake: None, .. } => Some("read"),
             IpcOp::Power { .. } => Some("admin"),
             IpcOp::DebugDrop { .. } | IpcOp::GuiWindow { .. } => None,
             IpcOp::ApiStatus | IpcOp::ApiEnable | IpcOp::ApiDisable | IpcOp::ApiTokenAdd { .. } | IpcOp::ApiTokenRemove { .. } | IpcOp::ApiTokenShow { .. } | IpcOp::ApiTokenSet { .. } => None,
