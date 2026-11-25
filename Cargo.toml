@@ -59,11 +59,28 @@ panic = "abort"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.6", features = ["fs", "process", "pty", "termios"] }
 
-# GUI: eframe (winit + OpenGL) and tray-icon on Windows and macOS
+# GUI: eframe (winit) and tray-icon on Windows and macOS
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # `clipboard`: without it copy (codes, passwords, tokens, instructions) and paste (the terminal) do nothing
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "clipboard"] }
 tray-icon = { version = "0.26.1", default-features = false }
+
+# Windows draws with Direct3D 12 through wgpu (a card's driver, else WARP, Windows' software renderer): old
+# cards' OpenGL drivers draw egui wrong, virtual machines have no OpenGL at all
+[target.'cfg(windows)'.dependencies.eframe]
+version = "0.37.0"
+default-features = false
+features = ["wgpu_no_default_features"]
+
+[target.'cfg(windows)'.dependencies.wgpu]
+version = "30.0.0"
+default-features = false
+features = ["std", "dx12", "wgsl"]
+
+[target.'cfg(target_os = "macos")'.dependencies.eframe]
+version = "0.37.0"
+default-features = false
+features = ["glow"]
 
 # GUI on Linux without any system library: X11 protocol in pure Rust, egui drawn on the CPU, tray over D-Bus
 [target.'cfg(target_os = "linux")'.dependencies]

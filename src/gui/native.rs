@@ -26,7 +26,12 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
         // Small enough for any screen until the first frame knows the screen's size (see `fit`).
         None => viewport.with_inner_size([900.0, 580.0]),
     };
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    #[cfg(windows)]
+    {
+        options.wgpu_options = wgpu_setup();
+    }
     eframe::run_native(
         "gangli",
         options,
@@ -46,6 +51,35 @@ pub fn run(client: Client, hidden: bool) -> Result<()> {
         }),
     )
     .map_err(|e| anyhow!("{e}"))
+}
+
+/// Windows draws with Direct3D 12 (wgpu): the graphics card when it has a Direct3D 12 driver, otherwise WARP,
+/// the software renderer every Windows 10 and 11 has. OpenGL is not an option there: old cards ship
+/// Windows 7 era drivers (OpenGL 2.1) that draw egui all wrong, and machines without a driver (virtual ones,
+/// the CI runners) have none at all.
+#[cfg(windows)]
+fn wgpu_setup() -> eframe::WgpuConfiguration {
+    use eframe::egui_wgpu;
+    use eframe::wgpu;
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    // A real card first (the integrated one before a power-hungry discrete one), WARP last.
+    let pick: egui_wgpu::NativeAdapterSelectorMethod = Arc::new(|adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>| {
+        let rank = |a: &wgpu::Adapter| match a.get_info().device_type {
+            wgpu::DeviceType::IntegratedGpu => 0,
+            wgpu::DeviceType::DiscreteGpu => 1,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 2,
+            wgpu::DeviceType::Cpu => 3,
+        };
+        adapters
+            .iter()
+            .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+            .min_by_key(|a| rank(a))
+            .cloned()
+            .ok_or_else(|| "no Direct3D 12 adapter, not even WARP".to_string())
+    });
+    setup.native_adapter_selector = Some(pick);
+    egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup), ..Default::default() }
 }
 
 struct Native {
@@ -252,7 +286,19 @@ impl eframe::App for Native {
         self.app.ui(ui);
     }
 
+    #[cfg(target_os = "macos")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.quit_once();
+    }
+
+    #[cfg(windows)]
+    fn on_exit(&mut self) {
+        self.quit_once();
+    }
+}
+
+impl Native {
+    fn quit_once(&mut self) {
         if !self.quitting {
             self.quitting = true;
             self.app.shutdown();
