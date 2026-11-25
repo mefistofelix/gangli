@@ -65,7 +65,7 @@ rustix = { version = "1.1.6", features = ["fs", "process", "pty", "termios"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "clipboard"] }
 tray-icon = { version = "0.26.1", default-features = false }
 
-# Windows draws with Direct3D 12 through wgpu (a card's driver, else WARP, Windows' software renderer): old
+# Windows draws on the CPU: Direct3D 12 through wgpu on WARP, Windows' software renderer (any machine): old
 # cards' OpenGL drivers draw egui wrong, virtual machines have no OpenGL at all
 [target.'cfg(windows)'.dependencies.eframe]
 version = "0.37.0"
